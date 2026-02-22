@@ -1,0 +1,67 @@
+.panelGroup {
+    @mixin light {
+        background-color: white;
+    }
+    @mixin dark {
+        background-color: var(--mantine-color-dark-8);
+    }
+}
+
+.sidebar {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+
+    padding: var(--mantine-spacing-xs);
+    @mixin light {
+        background: var(--mantine-color-ldGray-0);
+    }
+    @mixin dark {
+        background: var(--mantine-color-ldDark-2);
+    }
+    &[data-panel-size='0.0'] {
+        min-width: 3rem;
+    }
+}
+
+.sidebarTransition {
+    transition: all 300ms ease-in-out;
+}
+
+.chat {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.chatHeader {
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: var(--mantine-spacing-md);
+    border-bottom: 1px solid var(--mantine-color-ldGray-2);
+}
+
+.chatContent {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.resizeHandle {
+    width: 1px;
+    background-color: var(--mantine-color-ldGray-2);
+    cursor: col-resize;
+    transition: all 0.2s ease;
+
+    &[data-resize-handle-state='hover'],
+    &[data-resize-handle-state='drag'] {
+        background-color: var(--mantine-color-ldGray-4);
+        box-shadow: 0 0 0 1px var(--mantine-color-ldGray-4);
+    }
+}
+
+.artifact {
+    box-shadow: var(--mantine-shadow-lg);
+}

@@ -1,0 +1,465 @@
+import assertUnreachable from '../utils/assertUnreachable';
+import { type InlineError } from './explore';
+import {
+    DimensionType,
+    MetricType,
+    type CompiledDimension,
+    type CompiledMetric,
+    type Dimension,
+    type Field,
+    type FieldType,
+    type Metric,
+} from './field';
+import type { KnexPaginatedData } from './knex-paginate';
+import { type ChartSummary } from './savedCharts';
+import { type TraceTaskBase } from './scheduler';
+import { type TableBase } from './table';
+import type { Tag } from './tags';
+
+export enum CatalogType {
+    Table = 'table',
+    Field = 'field',
+}
+
+export enum CatalogFilter {
+    Tables = 'tables',
+    Dimensions = 'dimensions',
+    Metrics = 'metrics',
+}
+
+export type CatalogSelection = {
+    group: string;
+    table?: string;
+    field?: string;
+};
+
+export enum CatalogCategoryFilterMode {
+    AND = 'and',
+    OR = 'or',
+}
+
+export type ApiCatalogSearch = {
+    searchQuery?: string;
+    type?: CatalogType;
+    filter?: CatalogFilter;
+    catalogTags?: string[];
+    catalogTagsFilterMode?: CatalogCategoryFilterMode;
+    tables?: string[];
+    ownerUserUuids?: string[];
+};
+
+type EmojiIcon = {
+    unicode: string;
+};
+
+type CustomIcon = {
+    url: string;
+};
+
+export type CatalogItemIcon = EmojiIcon | CustomIcon;
+
+export const UNCATEGORIZED_TAG_UUID = '__uncategorized__';
+export const UNASSIGNED_OWNER = '__unassigned__';
+
+export type CatalogOwner = {
+    userUuid: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+};
+
+export const isEmojiIcon = (icon: CatalogItemIcon | null): icon is EmojiIcon =>
+    Boolean(icon && 'unicode' in icon);
+
+export const isCustomIcon = (
+    icon: CatalogItemIcon | null,
+): icon is CustomIcon => Boolean(icon && 'url' in icon);
+
+export type CatalogField = Pick<
+    Field,
+    'name' | 'label' | 'fieldType' | 'tableLabel' | 'description'
+> &
+    Pick<Dimension, 'requiredAttributes'> & {
+        catalogSearchUuid: string;
+        type: CatalogType.Field;
+        basicType: 'string' | 'number' | 'date' | 'timestamp' | 'boolean';
+        fieldValueType: Metric['type'] | Dimension['type'];
+        tableName: string;
+        tableGroupLabel?: string;
+        tags?: string[]; // Tags from table, for filtering
+        categories: Pick<Tag, 'name' | 'color' | 'tagUuid' | 'yamlReference'>[]; // Tags manually added by the user in the catalog
+        chartUsage: number | undefined;
+        icon: CatalogItemIcon | null;
+        aiHints: string[] | null;
+        searchRank?: number;
+        spotlightFilterBy?: string[]; // dimension IDs allowlist (metrics only)
+        spotlightSegmentBy?: string[]; // dimension IDs allowlist (metrics only)
+        owner: CatalogOwner | null; // resolved metric owner
+    };
+
+export type CatalogTable = Pick<
+    TableBase,
+    'name' | 'label' | 'groupLabel' | 'description' | 'requiredAttributes'
+> & {
+    catalogSearchUuid: string;
+    errors?: InlineError[]; // For explore errors
+    type: CatalogType.Table;
+    groupLabel?: string;
+    tags?: string[];
+    categories: Pick<Tag, 'name' | 'color' | 'tagUuid' | 'yamlReference'>[]; // Tags manually added by the user in the catalog
+    chartUsage: number | undefined;
+    icon: CatalogItemIcon | null;
+    aiHints: string[] | null;
+    joinedTables: string[] | null;
+    searchRank?: number;
+};
+
+export type CatalogItem = CatalogField | CatalogTable;
+
+export type CatalogMetricsTreeNode = Pick<
+    CatalogField,
+    'catalogSearchUuid' | 'name' | 'tableName'
+>;
+
+export type MetricsTreeSource = 'ui' | 'yaml';
+
+export type PrevMetricsTreeNode = {
+    metricsTreeUuid: string;
+    name: string;
+    tableName: string;
+    xPosition: number | null;
+    yPosition: number | null;
+    source: MetricsTreeSource;
+    createdAt: Date;
+};
+
+export type CatalogMetricsTreeEdge = {
+    source: CatalogMetricsTreeNode;
+    target: CatalogMetricsTreeNode;
+    createdAt: Date;
+    createdByUserUuid: string | null;
+    projectUuid: string;
+    createdFrom: MetricsTreeSource;
+};
+
+// --- Saved Metrics Trees ---
+
+export type MetricsTreeLockInfo = {
+    lockedByUserUuid: string;
+    lockedByUserName: string;
+    acquiredAt: Date;
+};
+
+export type MetricsTree = {
+    metricsTreeUuid: string;
+    projectUuid: string;
+    slug: string;
+    name: string;
+    description: string | null;
+    source: MetricsTreeSource;
+    createdByUserUuid: string | null;
+    updatedByUserUuid: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+    generation: number;
+};
+
+export type MetricsTreeSummary = MetricsTree & {
+    nodeCount: number;
+    lock: MetricsTreeLockInfo | null;
+};
+
+export type MetricsTreeNodePosition = {
+    catalogSearchUuid: string;
+    xPosition: number | null;
+    yPosition: number | null;
+};
+
+export type MetricsTreeNode = MetricsTreeNodePosition & {
+    name: string;
+    tableName: string;
+    source: MetricsTreeSource;
+};
+
+export type MetricsTreeWithDetails = MetricsTree & {
+    nodes: MetricsTreeNode[];
+    edges: CatalogMetricsTreeEdge[];
+    lock: MetricsTreeLockInfo | null;
+};
+
+// --- Saved Metrics Trees API Types ---
+
+export type ApiCreateMetricsTreePayload = {
+    name: string;
+    slug?: string;
+    description?: string;
+    source?: MetricsTreeSource;
+    nodes: Array<{
+        catalogSearchUuid: string;
+        xPosition?: number;
+        yPosition?: number;
+    }>;
+    edges: Array<{
+        sourceCatalogSearchUuid: string;
+        targetCatalogSearchUuid: string;
+    }>;
+};
+
+export type ApiUpdateMetricsTreePayload = {
+    name?: string;
+    description?: string;
+    /** The generation the client was editing. Used for conflict detection. */
+    expectedGeneration: number;
+    nodes: Array<{
+        catalogSearchUuid: string;
+        xPosition?: number;
+        yPosition?: number;
+    }>;
+    edges: Array<{
+        sourceCatalogSearchUuid: string;
+        targetCatalogSearchUuid: string;
+    }>;
+};
+
+export type ApiAddMetricsTreeNodesPayload = {
+    nodes: Array<{
+        catalogSearchUuid: string;
+        xPosition?: number;
+        yPosition?: number;
+    }>;
+};
+
+export type ApiUpdateMetricsTreeNodePositionsPayload = {
+    positions: MetricsTreeNodePosition[];
+};
+
+export type ApiGetMetricsTreesResponse = {
+    status: 'ok';
+    results: KnexPaginatedData<MetricsTreeSummary[]>;
+};
+
+export type ApiGetMetricsTreeResponse = {
+    status: 'ok';
+    results: MetricsTreeWithDetails;
+};
+
+export type ApiCreateMetricsTreeResponse = {
+    status: 'ok';
+    results: MetricsTree;
+};
+
+export type ApiUpdateMetricsTreeResponse = {
+    status: 'ok';
+    results: MetricsTreeWithDetails;
+};
+
+export type ApiMetricsTreeLockResponse = {
+    status: 'ok';
+    results: MetricsTreeLockInfo;
+};
+
+export type ApiGetUnassignedMetricsResponse = {
+    status: 'ok';
+    results: CatalogMetricsTreeNode[];
+};
+
+export type ApiCatalogResults = CatalogItem[];
+
+export type ApiMetricsCatalogResults = CatalogField[];
+
+export type ApiMetricsCatalog = {
+    status: 'ok';
+    results: KnexPaginatedData<ApiMetricsCatalogResults>;
+};
+
+export type MetricWithAssociatedTimeDimension = CompiledMetric & {
+    timeDimension:
+        | (CompiledMetric['defaultTimeDimension'] & { table: string })
+        | undefined;
+    availableTimeDimensions?: (CompiledDimension & {
+        type: DimensionType.DATE | DimensionType.TIMESTAMP;
+    })[];
+};
+
+export type ApiGetMetricPeek = {
+    status: 'ok';
+    results: MetricWithAssociatedTimeDimension;
+};
+
+export type ApiGetMetricsTreePayload = {
+    metricUuids: string[];
+};
+
+export type ApiGetMetricsTree = {
+    status: 'ok';
+    results: {
+        edges: CatalogMetricsTreeEdge[];
+    };
+};
+
+export type ApiGetAllMetricsTreeEdges = {
+    status: 'ok';
+    results: {
+        edges: CatalogMetricsTreeEdge[];
+    };
+};
+
+export type ApiMetricsTreeEdgePayload = {
+    sourceCatalogSearchUuid: string;
+    targetCatalogSearchUuid: string;
+};
+
+export type CatalogMetadata = {
+    name: string;
+    description: string | undefined;
+    label: string;
+    // TODO Tags
+    modelName: string;
+    source: string | undefined;
+    fields: CatalogField[];
+    joinedTables: string[];
+    tableLabel?: string;
+    fieldType?: FieldType;
+};
+export type ApiCatalogMetadataResults = CatalogMetadata;
+
+export type CatalogAnalytics = {
+    charts: (Pick<
+        ChartSummary,
+        | 'uuid'
+        | 'name'
+        | 'description'
+        | 'spaceUuid'
+        | 'spaceName'
+        | 'dashboardName'
+        | 'dashboardUuid'
+        | 'chartKind'
+    > & {
+        viewsCount?: number;
+    })[];
+};
+export type ApiCatalogAnalyticsResults = CatalogAnalytics;
+
+export const getBasicType = (field: CompiledDimension | CompiledMetric) => {
+    const { type } = field;
+    switch (type) {
+        case DimensionType.STRING:
+        case MetricType.STRING:
+            return 'string' as const;
+        case DimensionType.NUMBER:
+        case MetricType.NUMBER:
+        case MetricType.PERCENTILE:
+        case MetricType.MEDIAN:
+        case MetricType.AVERAGE:
+        case MetricType.COUNT:
+        case MetricType.COUNT_DISTINCT:
+        case MetricType.SUM:
+        case MetricType.MIN:
+        case MetricType.MAX:
+        case MetricType.PERCENT_OF_PREVIOUS:
+        case MetricType.PERCENT_OF_TOTAL:
+        case MetricType.RUNNING_TOTAL:
+            return 'number' as const;
+        case DimensionType.DATE:
+        case MetricType.DATE:
+            return 'date' as const;
+        case DimensionType.TIMESTAMP:
+        case MetricType.TIMESTAMP:
+            return 'timestamp' as const;
+        case DimensionType.BOOLEAN:
+        case MetricType.BOOLEAN:
+            return 'boolean' as const;
+        default:
+            return assertUnreachable(type, `Invalid field type ${type}`);
+    }
+};
+
+export type CatalogFieldMap = {
+    [fieldId: string]: {
+        fieldName: string;
+        tableName: string;
+        cachedExploreUuid: string;
+        fieldType: FieldType;
+    };
+};
+
+export type CatalogItemSummary = Pick<
+    CatalogItem,
+    'catalogSearchUuid' | 'name' | 'type'
+> & {
+    projectUuid: string;
+    cachedExploreUuid: string;
+    tableName: string;
+    fieldType: string | undefined;
+};
+
+export type CatalogItemWithTagUuids = CatalogItemSummary & {
+    catalogTags: {
+        tagUuid: string;
+        createdByUserUuid: string | null;
+        createdAt: Date;
+        taggedViaYaml: boolean;
+    }[];
+};
+
+export type CatalogItemsWithIcons = CatalogItemSummary &
+    Pick<CatalogItem, 'icon'>;
+
+export type SchedulerIndexCatalogJobPayload = TraceTaskBase & {
+    prevCatalogItemsWithTags: CatalogItemWithTagUuids[];
+    prevCatalogItemsWithIcons: CatalogItemsWithIcons[];
+    prevMetricTreeEdges: CatalogMetricsTreeEdge[];
+    prevMetricsTreeNodes: PrevMetricsTreeNode[];
+};
+
+export type ChartFieldUpdates = {
+    oldChartFields: {
+        metrics: string[];
+        dimensions: string[];
+    };
+    newChartFields: {
+        metrics: string[];
+        dimensions: string[];
+    };
+};
+
+export type ChartFieldChanges = {
+    added: {
+        dimensions: string[];
+        metrics: string[];
+    };
+    removed: {
+        dimensions: string[];
+        metrics: string[];
+    };
+};
+
+export type CatalogFieldWhere = {
+    fieldName: string;
+    fieldType: FieldType;
+    cachedExploreUuid: string;
+};
+
+export type ChartFieldUsageChanges = {
+    fieldsToIncrement: CatalogFieldWhere[];
+    fieldsToDecrement: CatalogFieldWhere[];
+};
+
+export type ChartUsageIn = CatalogFieldWhere & {
+    chartUsage: number;
+};
+
+export type ApiMetricsWithAssociatedTimeDimensionResponse = {
+    status: 'ok';
+    results: MetricWithAssociatedTimeDimension[];
+};
+
+export type ApiSegmentDimensionsResponse = {
+    status: 'ok';
+    results: CompiledDimension[];
+};
+
+export type ApiFilterDimensionsResponse = {
+    status: 'ok';
+    results: CompiledDimension[];
+};

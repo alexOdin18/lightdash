@@ -1,0 +1,15 @@
+# Lightdash config for Jaffle Shop (DuckDB)
+# See: https://docs.lightdash.com/guides/dbt/2-configure-your-dbt-project
+
+spotlight:
+  default_visibility: show
+  categories:
+    core:
+      label: "Core Metrics"
+      color: blue
+    sales:
+      label: "Sales"
+      color: green
+    revenue:
+      label: "Revenue"
+      color: violet

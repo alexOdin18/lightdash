@@ -1,0 +1,97 @@
+/**
+ * CSS selectors and IDs used by the screenshot/unfurl service.
+ * These are shared between the frontend (where elements are rendered) and backend (where Playwright waits for them).
+ *
+ * IMPORTANT: Changes to these constants must be coordinated between frontend and backend deployments.
+ */
+
+/**
+ * ID of the element that signals when a dashboard/chart is ready for screenshot.
+ * The UnfurlService waits for this element to appear before taking a screenshot.
+ *
+ * Usage:
+ * - Frontend: Rendered by ScreenshotReadyIndicator component
+ * - Backend: Waited for by UnfurlService.saveScreenshot()
+ */
+export const SCREENSHOT_READY_INDICATOR_ID = 'lightdash-ready-indicator';
+
+/**
+ * Class name for tile loading skeleton overlays.
+ * The UnfurlService waits for these elements to be hidden (loading complete).
+ *
+ * Usage:
+ * - Frontend: Applied by TileBaseV2 LoadingSkeletonOverlay
+ * - Backend: Waited for by UnfurlService.saveScreenshot()
+ */
+export const LOADING_CHART_OVERLAY_CLASS = 'loading_chart_overlay';
+
+/**
+ * Class name for chart loading state.
+ * The UnfurlService waits for these elements to be hidden (loading complete).
+ *
+ * Usage:
+ * - Frontend: Applied by chart components during loading
+ * - Backend: Waited for by UnfurlService.saveScreenshot()
+ */
+export const LOADING_CHART_CLASS = 'loading_chart';
+
+/**
+ * Class name for markdown tile content.
+ * The UnfurlService waits for these elements to be attached to the DOM.
+ *
+ * Usage:
+ * - Frontend: Applied to MarkdownPreview in DashboardMarkdownTile
+ * - Backend: Waited for by UnfurlService.saveScreenshot()
+ */
+export const MARKDOWN_TILE_CLASS = 'markdown-tile';
+
+/**
+ * Class name for the dashboard grid layout container.
+ * This is the screenshot target for dashboard screenshots.
+ *
+ * Usage:
+ * - Frontend: Applied to ResponsiveGridLayout in MinimalDashboard
+ * - Backend: Screenshot selector in UnfurlService.saveScreenshot()
+ */
+export const DASHBOARD_GRID_CLASS = 'react-grid-layout';
+
+/**
+ * ID of the element rendered by the error boundary fallback.
+ * The UnfurlService checks for this element to detect when an error occurred.
+ *
+ * Usage:
+ * - Frontend: Rendered by ErrorBoundary fallback component
+ * - Backend: Checked by UnfurlService.saveScreenshot() to detect errors
+ */
+export const ERROR_BOUNDARY_ID = 'lightdash-error-boundary';
+
+/**
+ * ID of the element rendered on the login page.
+ * The UnfurlService checks for this element to detect when authentication failed
+ * and the user was redirected to the login page instead of the requested content.
+ *
+ * Usage:
+ * - Frontend: Rendered by LoginLanding Card component
+ * - Backend: Checked by UnfurlService.saveScreenshot() to detect auth redirects
+ */
+export const LOGIN_PAGE_ID = 'lightdash-login-page';
+
+/**
+ * CSS Selectors (with prefix for direct use in querySelector/CSS)
+ */
+export const SCREENSHOT_SELECTORS = {
+    /** ID selector: #lightdash-ready-indicator */
+    READY_INDICATOR: `#${SCREENSHOT_READY_INDICATOR_ID}`,
+    /** Class selector: .loading_chart_overlay */
+    LOADING_OVERLAY: `.${LOADING_CHART_OVERLAY_CLASS}`,
+    /** Class selector: .loading_chart */
+    LOADING_CHART: `.${LOADING_CHART_CLASS}`,
+    /** Class selector: .markdown-tile */
+    MARKDOWN_TILE: `.${MARKDOWN_TILE_CLASS}`,
+    /** Class selector: .react-grid-layout */
+    DASHBOARD_GRID: `.${DASHBOARD_GRID_CLASS}`,
+    /** ID selector: #lightdash-error-boundary */
+    ERROR_BOUNDARY: `#${ERROR_BOUNDARY_ID}`,
+    /** ID selector: #lightdash-login-page */
+    LOGIN_PAGE: `#${LOGIN_PAGE_ID}`,
+} as const;

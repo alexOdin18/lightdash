@@ -1,0 +1,336 @@
+import {
+    assertUnreachable,
+    ChartKind,
+    ChartSourceType,
+    DashboardTileTypes,
+    defaultTileSize,
+    type ChartContent,
+    type Dashboard,
+} from '@lightdash/common';
+import { Button, Group, Loader, Stack, Text, Tooltip } from '@mantine-8/core';
+import {
+    getDefaultZIndex,
+    MultiSelect,
+    ScrollArea,
+    type ScrollAreaProps,
+} from '@mantine/core';
+import { useForm } from '@mantine/form';
+import { useDebouncedValue } from '@mantine/hooks';
+import { IconChartAreaLine } from '@tabler/icons-react';
+import uniqBy from 'lodash/uniqBy';
+import React, {
+    forwardRef,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FC,
+} from 'react';
+import { useParams } from 'react-router';
+import { v4 as uuid4 } from 'uuid';
+import { useChartSummariesV2 } from '../../../hooks/useChartSummariesV2';
+import useDashboardContext from '../../../providers/Dashboard/useDashboardContext';
+import MantineModal from '../../common/MantineModal';
+import { ChartIcon } from '../../common/ResourceIcon';
+
+type Props = {
+    onAddTiles: (tiles: Dashboard['tiles'][number][]) => void;
+    onClose: () => void;
+};
+
+interface ItemProps extends React.ComponentPropsWithoutRef<'div'> {
+    label: string;
+    chartKind: ChartKind;
+    tooltipLabel?: string;
+    disabled?: boolean;
+    selected?: boolean;
+}
+
+const SelectItem = forwardRef<HTMLDivElement, ItemProps>(
+    (
+        {
+            label,
+            tooltipLabel,
+            chartKind,
+            disabled,
+            selected,
+            ...others
+        }: ItemProps,
+        ref,
+    ) => (
+        <div ref={ref} {...others}>
+            <Stack gap="1">
+                <Tooltip
+                    label={tooltipLabel}
+                    disabled={!tooltipLabel}
+                    position="top-start"
+                    withinPortal
+                >
+                    <Group gap="xs">
+                        <ChartIcon
+                            chartKind={chartKind ?? ChartKind.VERTICAL_BAR}
+                            color={disabled ? 'ldGray.5' : undefined}
+                        />
+                        <Text
+                            c={
+                                disabled
+                                    ? 'dimmed'
+                                    : selected
+                                      ? 'ldGray.0'
+                                      : 'ldGray.8'
+                            }
+                            fw={500}
+                            fz="xs"
+                        >
+                            {label}
+                        </Text>
+                    </Group>
+                </Tooltip>
+            </Stack>
+        </div>
+    ),
+);
+
+const AddChartTilesModal: FC<Props> = ({ onAddTiles, onClose }) => {
+    const { projectUuid } = useParams<{ projectUuid: string }>();
+    const [searchQuery, setSearchQuery] = useState<string>('');
+    const [debouncedSearchQuery] = useDebouncedValue(searchQuery, 300);
+    const selectScrollRef = useRef<HTMLDivElement>(null);
+    const {
+        data: chartPages,
+        isInitialLoading,
+        isFetching,
+        hasNextPage,
+        fetchNextPage,
+    } = useChartSummariesV2(
+        {
+            projectUuid,
+            page: 1,
+            pageSize: 25,
+            search: debouncedSearchQuery,
+        },
+        { keepPreviousData: true },
+    );
+    useEffect(() => {
+        selectScrollRef.current?.scrollTo({
+            top: selectScrollRef.current?.scrollHeight,
+        });
+    }, [chartPages]);
+    // Aggregates all fetched charts across pages and search queries into a unified list.
+    // This ensures that previously fetched chart are preserved even when the search query changes.
+    // Uses 'uuid' to remove duplicates and maintain a consistent set of unique charts.
+    const [savedQueries, setSavedQueries] = useState<ChartContent[]>([]);
+    useEffect(() => {
+        const allPages = chartPages?.pages.map((p) => p.data).flat() ?? [];
+
+        setSavedQueries((previousState) =>
+            uniqBy([...previousState, ...allPages], 'uuid'),
+        );
+    }, [chartPages?.pages]);
+
+    const dashboardTiles = useDashboardContext((c) => c.dashboardTiles);
+    const dashboard = useDashboardContext((c) => c.dashboard);
+
+    const form = useForm({
+        initialValues: {
+            savedChartsUuids: [],
+        },
+    });
+
+    const allSavedCharts = useMemo(() => {
+        const reorderedCharts = savedQueries?.sort((chartA, chartB) => {
+            if (
+                chartA.space.uuid === chartB.space.uuid &&
+                !!chartA.lastUpdatedAt &&
+                !!chartB.lastUpdatedAt
+            ) {
+                return chartA.lastUpdatedAt > chartB.lastUpdatedAt ? -1 : 1;
+            } else if (chartA.space.uuid === dashboard?.spaceUuid) {
+                return -1;
+            } else if (chartB.space.uuid === dashboard?.spaceUuid) {
+                return 1;
+            } else {
+                return 0;
+            }
+        });
+
+        return (reorderedCharts || []).map((chart) => {
+            const { uuid, name, space, chartKind } = chart;
+            const isAlreadyAdded = dashboardTiles?.find((tile) => {
+                return (
+                    (tile.type === DashboardTileTypes.SAVED_CHART &&
+                        tile.properties.savedChartUuid === uuid) ||
+                    (tile.type === DashboardTileTypes.SQL_CHART &&
+                        tile.properties.savedSqlUuid === uuid)
+                );
+            });
+
+            return {
+                value: uuid,
+                label: name,
+                group: space.name,
+                tooltipLabel: isAlreadyAdded
+                    ? 'This chart has already been added to this dashboard'
+                    : undefined,
+                chartKind,
+            };
+        });
+    }, [savedQueries, dashboard?.spaceUuid, dashboardTiles]);
+
+    const handleSubmit = form.onSubmit(({ savedChartsUuids }) => {
+        onAddTiles(
+            savedChartsUuids.map((uuid) => {
+                const chart = savedQueries?.find((c) => c.uuid === uuid);
+                const sourceType = chart?.source;
+
+                switch (sourceType) {
+                    case ChartSourceType.SQL:
+                        return {
+                            uuid: uuid4(),
+                            type: DashboardTileTypes.SQL_CHART,
+                            properties: {
+                                savedSqlUuid: uuid,
+                                chartName: chart?.name ?? '',
+                            },
+                            tabUuid: undefined,
+                            ...defaultTileSize,
+                        };
+
+                    case undefined:
+                    case ChartSourceType.DBT_EXPLORE:
+                        return {
+                            uuid: uuid4(),
+                            type: DashboardTileTypes.SAVED_CHART,
+                            properties: {
+                                savedChartUuid: uuid,
+                                chartName: chart?.name ?? '',
+                                // BigNumber charts default to hidden title for cleaner appearance
+                                hideTitle:
+                                    chart?.chartKind === ChartKind.BIG_NUMBER
+                                        ? true
+                                        : undefined,
+                            },
+                            tabUuid: undefined,
+                            ...defaultTileSize,
+                        };
+
+                    default:
+                        return assertUnreachable(
+                            sourceType,
+                            `Unknown chart source type: ${sourceType}`,
+                        );
+                }
+            }),
+        );
+        onClose();
+    });
+
+    if (!savedQueries || !dashboardTiles || isInitialLoading) return null;
+
+    return (
+        <MantineModal
+            opened
+            onClose={onClose}
+            title="Add saved charts"
+            icon={IconChartAreaLine}
+            size="lg"
+            modalRootProps={{ closeOnClickOutside: false }}
+            actions={
+                <Button
+                    type="submit"
+                    form="add-saved-charts-to-dashboard"
+                    disabled={
+                        isInitialLoading ||
+                        form.values.savedChartsUuids.length === 0
+                    }
+                >
+                    Add
+                </Button>
+            }
+        >
+            <form id="add-saved-charts-to-dashboard" onSubmit={handleSubmit}>
+                <MultiSelect
+                    radius="md"
+                    styles={(theme) => ({
+                        separator: {
+                            position: 'sticky',
+                            top: 0,
+                            backgroundColor:
+                                theme.colorScheme === 'dark'
+                                    ? 'var(--mantine-color-dark-6)'
+                                    : 'var(--mantine-color-white)',
+                            zIndex: getDefaultZIndex('modal'),
+                        },
+                        separatorLabel: {
+                            color: theme.colors.ldGray[6],
+                            fontWeight: 500,
+                            backgroundColor:
+                                theme.colorScheme === 'dark'
+                                    ? 'var(--mantine-color-dark-6)'
+                                    : 'var(--mantine-color-white)',
+                        },
+                        item: {
+                            paddingTop: 4,
+                            paddingBottom: 4,
+                        },
+                    })}
+                    maw={550}
+                    id="saved-charts"
+                    label={`Select the charts you want to add to this dashboard`}
+                    data={allSavedCharts}
+                    disabled={isInitialLoading}
+                    defaultValue={[]}
+                    placeholder="Search..."
+                    required
+                    searchable
+                    withinPortal
+                    itemComponent={SelectItem}
+                    nothingFound="No charts found"
+                    clearable
+                    clearSearchOnChange
+                    clearSearchOnBlur
+                    searchValue={searchQuery}
+                    onSearchChange={setSearchQuery}
+                    maxDropdownHeight={300}
+                    rightSection={
+                        isFetching && <Loader size="xs" color="gray" />
+                    }
+                    dropdownComponent={({
+                        children,
+                        ...rest
+                    }: ScrollAreaProps) => (
+                        <ScrollArea {...rest} viewportRef={selectScrollRef}>
+                            <>
+                                {children}
+                                {hasNextPage && (
+                                    <Button
+                                        size="xs"
+                                        variant="subtle"
+                                        fullWidth
+                                        onClick={async () => {
+                                            await fetchNextPage();
+                                        }}
+                                        disabled={isFetching}
+                                    >
+                                        Load more
+                                    </Button>
+                                )}
+                            </>
+                        </ScrollArea>
+                    )}
+                    filter={(searchString, selected, item) => {
+                        return Boolean(
+                            selected ||
+                                item.label
+                                    ?.toLowerCase()
+                                    .includes(searchString.toLowerCase()),
+                        );
+                    }}
+                    {...form.getInputProps('savedChartsUuids')}
+                />
+            </form>
+        </MantineModal>
+    );
+};
+
+export default AddChartTilesModal;

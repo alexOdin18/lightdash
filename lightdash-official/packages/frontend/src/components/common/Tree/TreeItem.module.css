@@ -1,0 +1,32 @@
+.paper {
+    overflow: hidden;
+    background-color: transparent;
+
+    &:where([data-is-selectable='true']) {
+        cursor: pointer;
+
+        &:hover {
+            background-color: var(--mantine-color-ldGray-0);
+        }
+
+        &:is([data-selected='true']) {
+            background-color: var(--mantine-color-blue-0);
+
+            @mixin dark {
+                background-color: var(--mantine-color-blue-9);
+            }
+        }
+    }
+}
+
+.actionIcon {
+    opacity: 0.8;
+
+    &:hover {
+        opacity: 1;
+    }
+
+    &:where([data-has-children='false']) {
+        visibility: hidden;
+    }
+}

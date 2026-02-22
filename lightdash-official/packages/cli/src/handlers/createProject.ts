@@ -1,0 +1,350 @@
+import {
+    CreateProjectOptionalCredentials,
+    CreateProjectTableConfiguration,
+    DbtProjectType,
+    getLatestSupportDbtVersion,
+    HealthState,
+    ProjectType,
+    SnowflakeAuthenticationType,
+    WarehouseTypes,
+    type ApiCreateProjectResults,
+    type CreateWarehouseCredentials,
+    type DbtVersionOption,
+    type OrganizationWarehouseCredentialsSummary,
+} from '@lightdash/common';
+import inquirer from 'inquirer';
+import path from 'path';
+import { getConfig, setAnswer } from '../config';
+import { getDbtContext } from '../dbt/context';
+import GlobalState from '../globalState';
+import * as styles from '../styles';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { checkProjectCreationPermission, lightdashApi } from './dbt/apiClient';
+import getDbtProfileTargetName from './dbt/getDbtProfileTargetName';
+import { tryGetDbtVersion } from './dbt/getDbtVersion';
+import getWarehouseClient, {
+    createProgramaticallySnowflakePat,
+} from './dbt/getWarehouseClient';
+
+const askToRememberAnswer = async (): Promise<void> => {
+    const answers = await inquirer.prompt([
+        {
+            type: 'confirm',
+            name: 'isConfirm',
+            message: 'Do you want to save this answer for next time?',
+        },
+    ]);
+    if (answers.isConfirm) {
+        await setAnswer({
+            permissionToStoreWarehouseCredentials: true,
+        });
+    }
+};
+
+const askPermissionToStoreWarehouseCredentials = async (
+    assumeYes: boolean = false,
+): Promise<boolean> => {
+    if (GlobalState.isNonInteractive() || assumeYes) {
+        GlobalState.debug('> Auto-accepting warehouse credentials storage');
+        return true;
+    }
+
+    const config = await getConfig();
+    const savedAnswer = config.answers?.permissionToStoreWarehouseCredentials;
+    if (!savedAnswer) {
+        const spinner = GlobalState.getActiveSpinner();
+        if (spinner) {
+            spinner.stop();
+        }
+        const answers = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'isConfirm',
+                message:
+                    'Do you confirm Lightdash can store your warehouse credentials so you can run queries in Lightdash?',
+            },
+        ]);
+        if (answers.isConfirm) {
+            await askToRememberAnswer();
+        }
+        if (spinner) {
+            spinner.start();
+        }
+        return answers.isConfirm;
+    }
+    return savedAnswer;
+};
+
+export const resolveOrganizationCredentialsName = async (
+    name: string,
+): Promise<string> => {
+    GlobalState.debug(
+        `> Resolving organization warehouse credentials: ${name}`,
+    );
+
+    try {
+        const credentialsList = await lightdashApi<
+            OrganizationWarehouseCredentialsSummary[]
+        >({
+            method: 'GET',
+            url: '/api/v1/org/warehouse-credentials?summary=true',
+            body: undefined,
+        });
+
+        const credential = credentialsList.find((cred) => cred.name === name);
+
+        if (!credential) {
+            const availableNames =
+                credentialsList.length > 0
+                    ? credentialsList
+                          .map((c) => `  - ${c.name} (${c.warehouseType})`)
+                          .join('\n')
+                    : '  (none available)';
+            throw new Error(
+                `Organization warehouse credentials "${name}" not found.\n\nAvailable credentials:\n${availableNames}`,
+            );
+        }
+
+        GlobalState.debug(
+            `> Resolved "${name}" to UUID: ${credential.organizationWarehouseCredentialsUuid}`,
+        );
+
+        return credential.organizationWarehouseCredentialsUuid;
+    } catch (error) {
+        if (error instanceof Error) {
+            throw error;
+        }
+        throw new Error(
+            'Failed to resolve organization warehouse credentials. This may be an Enterprise Edition feature that is not available.',
+        );
+    }
+};
+
+type CreateProjectOptions = {
+    name: string;
+    projectDir: string;
+    profilesDir: string;
+    target: string | undefined;
+    profile: string | undefined;
+    type: ProjectType;
+    startOfWeek?: number;
+    upstreamProjectUuid?: string;
+    tableConfiguration?: CreateProjectTableConfiguration;
+    copyContent?: boolean;
+    warehouseCredentials?: boolean;
+    organizationCredentials?: string;
+    targetPath?: string;
+    assumeYes?: boolean;
+};
+
+const isSnowflakeSsoEnabled = async (): Promise<boolean> => {
+    const response = await lightdashApi<HealthState>({
+        method: 'GET',
+        url: `/api/v1/health`,
+        body: undefined,
+    });
+
+    return response?.auth?.snowflake?.enabled ?? false;
+};
+
+export const createProject = async (
+    options: CreateProjectOptions,
+): Promise<ApiCreateProjectResults | undefined> => {
+    await checkProjectCreationPermission(
+        options.upstreamProjectUuid,
+        options.type,
+    );
+
+    // Resolve organization credentials early before doing any heavy work
+    let organizationWarehouseCredentialsUuid: string | undefined;
+    if (options.organizationCredentials) {
+        organizationWarehouseCredentialsUuid =
+            await resolveOrganizationCredentialsName(
+                options.organizationCredentials,
+            );
+    }
+
+    const absoluteProjectPath = path.resolve(options.projectDir);
+
+    let targetName: string | undefined;
+    let credentials: CreateWarehouseCredentials | undefined;
+    let isDbtCloudCLI = false;
+    let dbtVersionOption: DbtVersionOption = getLatestSupportDbtVersion();
+
+    // If using organization credentials, don't load warehouse credentials from profiles
+    if (organizationWarehouseCredentialsUuid) {
+        GlobalState.debug(
+            `> Using organization warehouse credentials: ${options.organizationCredentials}`,
+        );
+
+        const dbtVersionResult = await tryGetDbtVersion();
+        if (!dbtVersionResult.success) {
+            throw dbtVersionResult.error;
+        }
+        isDbtCloudCLI = dbtVersionResult.version.isDbtCloudCLI;
+        dbtVersionOption = dbtVersionResult.version.versionOption;
+
+        // Still need to get target name for dbt connection
+        const context = await getDbtContext({
+            projectDir: absoluteProjectPath,
+            targetPath: options.targetPath,
+        });
+        GlobalState.debug(
+            `> Using profiles dir ${options.profilesDir} and profile ${
+                options.profile || context.profileName
+            }`,
+        );
+        targetName = await getDbtProfileTargetName({
+            isDbtCloudCLI,
+            profilesDir: options.profilesDir,
+            profile: options.profile || context.profileName,
+            target: options.target,
+        });
+        GlobalState.debug(`> Using target name ${targetName}`);
+    } else if (options.warehouseCredentials === false) {
+        GlobalState.debug('> Creating project without warehouse credentials');
+        // No dbt needed - use defaults set above
+    } else {
+        const dbtVersionResult = await tryGetDbtVersion();
+        if (!dbtVersionResult.success) {
+            throw dbtVersionResult.error;
+        }
+        isDbtCloudCLI = dbtVersionResult.version.isDbtCloudCLI;
+        dbtVersionOption = dbtVersionResult.version.versionOption;
+
+        const context = await getDbtContext({
+            projectDir: absoluteProjectPath,
+            targetPath: options.targetPath,
+        });
+        GlobalState.debug(
+            `> Using profiles dir ${options.profilesDir} and profile ${
+                options.profile || context.profileName
+            }`,
+        );
+        targetName = await getDbtProfileTargetName({
+            isDbtCloudCLI,
+            profilesDir: options.profilesDir,
+            profile: options.profile || context.profileName,
+            target: options.target,
+        });
+        GlobalState.debug(`> Using target name ${targetName}`);
+        const canStoreWarehouseCredentials =
+            await askPermissionToStoreWarehouseCredentials(options.assumeYes);
+        if (!canStoreWarehouseCredentials) {
+            GlobalState.debug(
+                '> User declined to store warehouse credentials use --no-warehouse-credentials to create a project without warehouse credentials',
+            );
+            return undefined;
+        }
+        const result = await getWarehouseClient({
+            isDbtCloudCLI,
+            profilesDir: options.profilesDir,
+            profile: options.profile || context.profileName,
+            target: options.target,
+            startOfWeek: options.startOfWeek,
+        });
+        credentials = result.credentials;
+    }
+
+    if (
+        credentials?.type === WarehouseTypes.BIGQUERY &&
+        credentials.keyfileContents.project_id &&
+        credentials.keyfileContents.project_id !== credentials.project
+    ) {
+        if (GlobalState.isNonInteractive() && !options.assumeYes) {
+            throw new Error(
+                `BigQuery project mismatch: credentials file uses "${credentials.keyfileContents.project_id}" ` +
+                    `but profiles.yml specifies "${credentials.project}". ` +
+                    'This may cause permission issues. Use --assume-yes to bypass this warning.',
+            );
+        }
+
+        if (options.assumeYes) {
+            GlobalState.debug(
+                `> Auto-accepting BigQuery project mismatch (credentials: ${credentials.keyfileContents.project_id}, profiles: ${credentials.project})`,
+            );
+        } else {
+            const spinner = GlobalState.getActiveSpinner();
+            spinner?.stop();
+            const answers = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'isConfirm',
+                    message: `${styles.title(
+                        'Warning',
+                    )}: Your project on your credentials file ${styles.title(
+                        credentials.keyfileContents.project_id,
+                    )} does not match your project on your profiles.yml ${styles.title(
+                        credentials.project,
+                    )}, this might cause permission issues when accessing data on the warehouse. Are you sure you want to continue?`,
+                },
+            ]);
+
+            if (!answers.isConfirm) {
+                process.exit(1);
+            }
+            spinner?.start();
+        }
+    }
+
+    if (
+        credentials?.type === WarehouseTypes.SNOWFLAKE &&
+        credentials?.authenticationType ===
+            SnowflakeAuthenticationType.EXTERNAL_BROWSER
+    ) {
+        const snowflakeSsoEnabled = await isSnowflakeSsoEnabled();
+
+        if (snowflakeSsoEnabled) {
+            console.error(
+                styles.info(
+                    `\nLightdash server has Snowflake OAuth authentication enabled.
+We will ask for user credentials again on the Lightdash UI.\n`,
+                ),
+            );
+            credentials = {
+                ...credentials,
+                requireUserCredentials: true,
+            };
+        } else {
+            console.error(
+                styles.warning(
+                    `\nUser has externalbrowser snowflake authentication. 
+We will generate programatically a temporary PAT to enable access on Lightdash which expires in 1 day.
+For a better user experience, we recommend enabling Snowflake OAuth authentication on the server.\n`,
+                ),
+            );
+            const patToken =
+                await createProgramaticallySnowflakePat(credentials);
+            credentials = {
+                ...credentials,
+                authenticationType: SnowflakeAuthenticationType.PASSWORD,
+                password: patToken,
+            };
+        }
+    }
+
+    const project: CreateProjectOptionalCredentials = {
+        name: options.name,
+        type: options.type,
+        warehouseConnection: credentials,
+        copyWarehouseConnectionFromUpstreamProject:
+            isDbtCloudCLI ||
+            (options.warehouseCredentials === false &&
+                options.upstreamProjectUuid !== undefined),
+        dbtConnection: {
+            type: DbtProjectType.NONE,
+            target: targetName,
+        },
+        upstreamProjectUuid: options.upstreamProjectUuid,
+        dbtVersion: dbtVersionOption,
+        tableConfiguration: options.tableConfiguration,
+        copyContent: options.copyContent,
+        organizationWarehouseCredentialsUuid,
+    };
+
+    return lightdashApi<ApiCreateProjectResults>({
+        method: 'POST',
+        url: `/api/v1/org/projects`,
+        body: JSON.stringify(project),
+    });
+};

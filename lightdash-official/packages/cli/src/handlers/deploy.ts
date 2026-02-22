@@ -1,0 +1,358 @@
+import {
+    AuthorizationError,
+    Explore,
+    ExploreError,
+    ParseError,
+    Project,
+    ProjectType,
+    friendlyName,
+    getErrorMessage,
+    isExploreError,
+    type LightdashProjectConfig,
+    type Tag,
+} from '@lightdash/common';
+import inquirer from 'inquirer';
+import path from 'path';
+import { URL } from 'url';
+import { v4 as uuidv4 } from 'uuid';
+import { LightdashAnalytics } from '../analytics/analytics';
+import { getConfig, setProject } from '../config';
+import { getDbtContext } from '../dbt/context';
+import GlobalState from '../globalState';
+import { readAndLoadLightdashProjectConfig } from '../lightdash-config';
+import * as styles from '../styles';
+import { compile } from './compile';
+import {
+    createProject,
+    resolveOrganizationCredentialsName,
+} from './createProject';
+import { checkLightdashVersion, lightdashApi } from './dbt/apiClient';
+import { DbtCompileOptions } from './dbt/compile';
+import { tryGetDbtVersion } from './dbt/getDbtVersion';
+import { CliProjectType, detectProjectType } from '../lightdash/projectType';
+import { logSelectedProject, selectProject } from './selectProject';
+
+type DeployHandlerOptions = DbtCompileOptions & {
+    projectDir: string;
+    profilesDir: string;
+    target: string | undefined;
+    profile: string | undefined;
+    create?: boolean | string;
+    verbose: boolean;
+    ignoreErrors: boolean;
+    startOfWeek?: number;
+    warehouseCredentials?: boolean;
+    organizationCredentials?: string;
+    assumeYes?: boolean;
+};
+
+type DeployArgs = DeployHandlerOptions & {
+    projectUuid: string;
+};
+
+const replaceProjectYamlTags = async (
+    projectUuid: string,
+    lightdashProjectConfig: LightdashProjectConfig,
+) => {
+    const yamlTags: (Pick<Tag, 'name' | 'color'> & {
+        yamlReference: NonNullable<Tag['yamlReference']>;
+    })[] = Object.entries(
+        lightdashProjectConfig.spotlight?.categories ?? {},
+    ).map(([yamlReference, category]) => ({
+        yamlReference,
+        name: category.label,
+        color: category.color ?? 'gray',
+    }));
+
+    await lightdashApi<null>({
+        method: 'PUT',
+        url: `/api/v1/projects/${projectUuid}/tags/yaml`,
+        body: JSON.stringify(yamlTags),
+    });
+};
+
+const replaceProjectParameters = async (
+    projectUuid: string,
+    lightdashProjectConfig: LightdashProjectConfig,
+) => {
+    await lightdashApi<null>({
+        method: 'PUT',
+        url: `/api/v2/projects/${projectUuid}/parameters`,
+        body: JSON.stringify(lightdashProjectConfig.parameters ?? {}),
+    });
+};
+
+export const deploy = async (
+    explores: (Explore | ExploreError)[],
+    options: DeployArgs,
+): Promise<void> => {
+    if (explores.length === 0) {
+        GlobalState.log(styles.warning('No explores found'));
+        process.exit(1);
+    }
+
+    const errors = explores.filter((e) => isExploreError(e)).length;
+    if (errors > 0) {
+        if (options.ignoreErrors) {
+            console.error(
+                styles.warning(`\nDeploying project with ${errors} errors\n`),
+            );
+        } else {
+            console.error(
+                styles.error(
+                    `Can't deploy with errors. If you still want to deploy, add ${styles.bold(
+                        '--ignore-errors',
+                    )} flag`,
+                ),
+            );
+            process.exit(1);
+        }
+    }
+
+    const lightdashProjectConfig = await readAndLoadLightdashProjectConfig(
+        path.resolve(options.projectDir),
+        options.projectUuid,
+    );
+
+    // These two methods are not critical to the deployment process, so we can ignore errors and show warnings instead
+    try {
+        await replaceProjectYamlTags(
+            options.projectUuid,
+            lightdashProjectConfig,
+        );
+    } catch (e) {
+        console.error(
+            styles.warning(
+                `\nError replacing YAML tags: ${getErrorMessage(e)}\n`,
+            ),
+        );
+    }
+
+    try {
+        await replaceProjectParameters(
+            options.projectUuid,
+            lightdashProjectConfig,
+        );
+    } catch (e) {
+        console.error(
+            styles.warning(
+                `\nError replacing project parameters: ${getErrorMessage(e)}\n`,
+            ),
+        );
+    }
+
+    await lightdashApi<null>({
+        method: 'PUT',
+        url: `/api/v1/projects/${options.projectUuid}/explores`,
+        body: JSON.stringify(explores),
+    });
+    await LightdashAnalytics.track({
+        event: 'deploy.triggered',
+        properties: {
+            projectId: options.projectUuid,
+        },
+    });
+};
+
+const createNewProject = async (
+    executionId: string,
+    options: DeployHandlerOptions,
+): Promise<Project | undefined> => {
+    console.error('');
+    const absoluteProjectPath = path.resolve(options.projectDir);
+
+    let defaultProjectName: string = 'My new Lightdash Project'; // TODO: improve
+    try {
+        const context = await getDbtContext({
+            projectDir: absoluteProjectPath,
+            targetPath: options.targetPath,
+        });
+        defaultProjectName = friendlyName(context.projectName);
+    } catch (e) {
+        if (e instanceof ParseError) {
+            // stick with default name
+        }
+    }
+
+    // If interactive and no name provided, prompt for project name
+    let projectName = defaultProjectName;
+    if (options.create === true && !GlobalState.isNonInteractive()) {
+        const answers = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'name',
+                message: `Add a project name or press enter to use the default: [${defaultProjectName}] `,
+            },
+        ]);
+        projectName = answers.name ? answers.name : defaultProjectName;
+    }
+    // If explicit name provided, use it
+    if (typeof options.create === 'string') {
+        projectName = options.create;
+    }
+
+    projectName = projectName.trim();
+
+    // Create the project
+    console.error('');
+    const spinner = GlobalState.startSpinner(
+        `  Creating new project ${styles.bold(projectName)}`,
+    );
+    await LightdashAnalytics.track({
+        event: 'create.started',
+        properties: {
+            executionId,
+            projectName,
+            isDefaultName: defaultProjectName === projectName,
+        },
+    });
+    try {
+        const results = await createProject({
+            ...options,
+            name: projectName,
+            type: ProjectType.DEFAULT,
+            warehouseCredentials: options.warehouseCredentials,
+            assumeYes: options.assumeYes,
+        });
+
+        const project = results?.project;
+
+        if (!project) {
+            spinner.fail('Cancel preview environment');
+            return undefined;
+        }
+        spinner.succeed(`  New project ${styles.bold(projectName)} created\n`);
+
+        await LightdashAnalytics.track({
+            event: 'create.completed',
+            properties: {
+                executionId,
+                projectId: project.projectUuid,
+                projectName,
+            },
+        });
+
+        return project;
+    } catch (e) {
+        await LightdashAnalytics.track({
+            event: 'create.error',
+            properties: {
+                executionId,
+                error: `Error creating developer preview ${e}`,
+            },
+        });
+
+        spinner.fail();
+        throw e;
+    }
+};
+
+export const deployHandler = async (originalOptions: DeployHandlerOptions) => {
+    const options = {
+        ...originalOptions,
+    };
+    GlobalState.setVerbose(options.verbose);
+
+    // Detect project type and configure options accordingly
+    const projectTypeConfig = await detectProjectType({
+        projectDir: options.projectDir,
+        userOptions: {
+            warehouseCredentials: options.warehouseCredentials,
+            skipDbtCompile: options.skipDbtCompile,
+            skipWarehouseCatalog: options.skipWarehouseCatalog,
+        },
+    });
+
+    // Apply project type configuration to options
+    options.warehouseCredentials = projectTypeConfig.warehouseCredentials;
+    options.skipDbtCompile = projectTypeConfig.skipDbtCompile;
+    options.skipWarehouseCatalog = projectTypeConfig.skipWarehouseCatalog;
+
+    // Resolve organization credentials early before doing any heavy work
+    if (options.organizationCredentials) {
+        try {
+            await resolveOrganizationCredentialsName(
+                options.organizationCredentials,
+            );
+        } catch (error) {
+            console.error(
+                styles.error(
+                    error instanceof Error ? error.message : 'Unknown error',
+                ),
+            );
+            process.exit(1);
+        }
+    }
+
+    // Only check dbt version for dbt projects (YAML-only projects don't need dbt)
+    // For YAML-only projects, we return success: false to indicate dbt wasn't checked,
+    // with null error since this is expected behavior, not an error condition.
+    // This allows downstream code to distinguish "dbt check skipped" from "dbt check failed".
+    const dbtVersionResult =
+        projectTypeConfig.type === CliProjectType.Dbt
+            ? await tryGetDbtVersion()
+            : { success: false as const, error: null };
+    await checkLightdashVersion();
+    const executionId = uuidv4();
+    const explores = await compile(options);
+
+    const config = await getConfig();
+    let projectUuid: string;
+
+    if (options.create !== undefined) {
+        const project = await createNewProject(executionId, options);
+        if (!project) {
+            console.error(
+                "To preview your project, you'll need to manually enter your warehouse connection details.",
+            );
+            const createProjectUrl =
+                config.context?.serverUrl &&
+                new URL('/createProject', config.context.serverUrl);
+            if (createProjectUrl) {
+                console.error(
+                    `Fill out the project connection form here: ${createProjectUrl}`,
+                );
+            }
+            return;
+        }
+        projectUuid = project.projectUuid;
+        await setProject(projectUuid, project.name);
+    } else {
+        if (!config.context?.serverUrl) {
+            throw new AuthorizationError(
+                `No active Lightdash project. Run 'lightdash login --help'`,
+            );
+        }
+        const projectSelection = await selectProject(config);
+        if (!projectSelection) {
+            throw new AuthorizationError(
+                `No active Lightdash project. Run 'lightdash login --help'`,
+            );
+        }
+        projectUuid = projectSelection.projectUuid;
+
+        // Log current project info
+        logSelectedProject(projectSelection, config, 'Deploying to');
+    }
+
+    await deploy(explores, { ...options, projectUuid });
+
+    const serverUrl = config.context?.serverUrl?.replace(/\/$/, '');
+    let displayUrl = options.create
+        ? `${serverUrl}/createProject/cli?projectUuid=${projectUuid}`
+        : `${serverUrl}/projects/${projectUuid}/home`;
+    let successMessage = 'Successfully deployed project:';
+    if (
+        dbtVersionResult.success &&
+        dbtVersionResult.version.isDbtCloudCLI &&
+        options.create
+    ) {
+        successMessage =
+            'Successfully deployed project! Complete the setup by adding warehouse connection details here:';
+        displayUrl = `${serverUrl}/generalSettings/projectManagement/${projectUuid}/settings`;
+    }
+    console.error(`${styles.bold(successMessage)}`);
+    console.error('');
+    console.error(`      ${styles.bold(`⚡️ ${displayUrl}`)}`);
+    console.error('');
+};

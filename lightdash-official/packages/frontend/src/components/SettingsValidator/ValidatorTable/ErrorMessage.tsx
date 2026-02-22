@@ -1,0 +1,126 @@
+import {
+    DashboardFilterValidationErrorType,
+    friendlyName,
+    isChartValidationError,
+    isDashboardValidationError,
+    isTableValidationError,
+    ValidationErrorType,
+    type ValidationResponse,
+} from '@lightdash/common';
+import { Mark, Stack, Text } from '@mantine/core';
+import { type FC } from 'react';
+
+const CustomMark: FC<React.PropsWithChildren<{}>> = ({ children }) => (
+    <Mark
+        color="gray"
+        px={2}
+        fw={500}
+        fz="xs"
+        sx={{
+            textTransform: 'none',
+            borderRadius: '2px',
+        }}
+    >
+        {children}
+    </Mark>
+);
+
+const ErrorMessageByType: FC<{
+    validationError: ValidationResponse;
+}> = ({ validationError }) => {
+    if (isChartValidationError(validationError)) {
+        // Handle chart configuration errors (unused dimensions)
+        if (
+            validationError.errorType === ValidationErrorType.ChartConfiguration
+        ) {
+            return (
+                <Text>
+                    <CustomMark>{validationError.fieldName}</CustomMark> is
+                    included in the query but not used in the chart
+                    configuration (x-axis, y-axis, or group by). This can cause
+                    incorrect rendering. We recommend removing unused dimensions
+                    from the query.
+                </Text>
+            );
+        }
+        return (
+            <Text>
+                <CustomMark>{validationError.fieldName}</CustomMark> no longer
+                exists
+            </Text>
+        );
+    }
+
+    if (isDashboardValidationError(validationError)) {
+        // Handle dashboard filter errors with typed error types
+        if (validationError.dashboardFilterErrorType) {
+            switch (validationError.dashboardFilterErrorType) {
+                case DashboardFilterValidationErrorType.TableNotUsedByAnyChart:
+                    return (
+                        <Text>
+                            <CustomMark>{validationError.fieldName}</CustomMark>{' '}
+                            references table{' '}
+                            <CustomMark>{validationError.tableName}</CustomMark>{' '}
+                            which is not used by any chart on this dashboard
+                        </Text>
+                    );
+                case DashboardFilterValidationErrorType.FieldDoesNotExist:
+                    return (
+                        <Text>
+                            <CustomMark>{validationError.fieldName}</CustomMark>{' '}
+                            no longer exists
+                        </Text>
+                    );
+                case DashboardFilterValidationErrorType.TableDoesNotExist:
+                    return (
+                        <Text>
+                            Table{' '}
+                            <CustomMark>{validationError.tableName}</CustomMark>{' '}
+                            no longer exists
+                        </Text>
+                    );
+                default:
+                    return <Text>{validationError.error}</Text>;
+            }
+        }
+
+        // Handle broken chart errors
+        if (validationError.chartName) {
+            return (
+                <Text>
+                    <CustomMark>{validationError.chartName}</CustomMark> is
+                    broken
+                </Text>
+            );
+        }
+
+        // Fallback for unexpected cases
+        return <Text>{validationError.error}</Text>;
+    }
+
+    if (isTableValidationError(validationError) && validationError) {
+        return <Text>{validationError.error}</Text>;
+    }
+
+    return null;
+};
+
+export const ErrorMessage: FC<{ validationError: ValidationResponse }> = ({
+    validationError,
+}) => {
+    const isWarning =
+        isChartValidationError(validationError) &&
+        validationError.errorType === ValidationErrorType.ChartConfiguration;
+
+    return (
+        <Stack spacing={4}>
+            <Text fw={600} color={isWarning ? 'orange.6' : 'red.6'} fz={11}>
+                {validationError.errorType
+                    ? friendlyName(validationError.errorType)
+                    : ''}{' '}
+                {isWarning ? 'warning' : 'error'}
+            </Text>
+            <ErrorMessageByType validationError={validationError} />
+        </Stack>
+    );
+};

@@ -1,0 +1,1680 @@
+import { subject } from '@casl/ability';
+import {
+    AbilityAction,
+    Account,
+    AnonymousAccount,
+    BulkActionable,
+    ChartHistory,
+    ChartSummary,
+    ChartType,
+    ChartVersion,
+    CreateSavedChart,
+    CreateSavedChartVersion,
+    CreateSchedulerAndTargetsWithoutIds,
+    DeletedChartContentSummary,
+    DeletedContentFilters,
+    ExploreType,
+    ForbiddenError,
+    GoogleSheetsTransientError,
+    KnexPaginateArgs,
+    KnexPaginatedData,
+    MissingConfigError,
+    NotFoundError,
+    ParameterError,
+    SavedChart,
+    SavedChartDAO,
+    SchedulerAndTargets,
+    SchedulerFormat,
+    SessionUser,
+    SpaceSummary,
+    TogglePinnedItemInfo,
+    UnexpectedGoogleSheetsError,
+    UpdateMultipleSavedChart,
+    UpdateSavedChart,
+    UpdatedByUser,
+    ViewStatistics,
+    assertUnreachable,
+    countCustomDimensionsInMetricQuery,
+    countTotalFilterRules,
+    generateSlug,
+    getTimezoneLabel,
+    isChartScheduler,
+    isConditionalFormattingConfigWithColorRange,
+    isConditionalFormattingConfigWithSingleColor,
+    isCustomSqlDimension,
+    isJwtUser,
+    isSchedulerGsheetsOptions,
+    isUserWithOrg,
+    isValidFrequency,
+    isValidTimezone,
+    type ChartFieldUpdates,
+    type Explore,
+    type ExploreError,
+    type SpaceAccess,
+} from '@lightdash/common';
+import cronstrue from 'cronstrue';
+import { Knex } from 'knex';
+import {
+    ConditionalFormattingRuleSavedEvent,
+    CreateSavedChartVersionEvent,
+    LightdashAnalytics,
+    SchedulerUpsertEvent,
+} from '../../analytics/LightdashAnalytics';
+import { GoogleDriveClient } from '../../clients/Google/GoogleDriveClient';
+import { SlackClient } from '../../clients/Slack/SlackClient';
+import { LightdashConfig } from '../../config/parseConfig';
+import { getSchedulerTargetType } from '../../database/entities/scheduler';
+import { AnalyticsModel } from '../../models/AnalyticsModel';
+import type { CatalogModel } from '../../models/CatalogModel/CatalogModel';
+import { getChartFieldUsageChanges } from '../../models/CatalogModel/utils';
+import { DashboardModel } from '../../models/DashboardModel/DashboardModel';
+import { PinnedListModel } from '../../models/PinnedListModel';
+import { ProjectModel } from '../../models/ProjectModel/ProjectModel';
+import { SavedChartModel } from '../../models/SavedChartModel';
+import { SchedulerModel } from '../../models/SchedulerModel';
+import { SpaceModel } from '../../models/SpaceModel';
+import { SchedulerClient } from '../../scheduler/SchedulerClient';
+import { BaseService } from '../BaseService';
+import { PermissionsService } from '../PermissionsService/PermissionsService';
+import { SpacePermissionService } from '../SpaceService/SpacePermissionService';
+import { UserService } from '../UserService';
+
+type SavedChartServiceArguments = {
+    analytics: LightdashAnalytics;
+    lightdashConfig: LightdashConfig;
+    projectModel: ProjectModel;
+    savedChartModel: SavedChartModel;
+    spaceModel: SpaceModel;
+    analyticsModel: AnalyticsModel;
+    pinnedListModel: PinnedListModel;
+    schedulerModel: SchedulerModel;
+    schedulerClient: SchedulerClient;
+    slackClient: SlackClient;
+    dashboardModel: DashboardModel;
+    catalogModel: CatalogModel;
+    permissionsService: PermissionsService;
+    googleDriveClient: GoogleDriveClient;
+    userService: UserService;
+    spacePermissionService: SpacePermissionService;
+};
+
+export class SavedChartService
+    extends BaseService
+    implements BulkActionable<Knex>
+{
+    private readonly analytics: LightdashAnalytics;
+
+    private readonly lightdashConfig: LightdashConfig;
+
+    private readonly projectModel: ProjectModel;
+
+    private readonly savedChartModel: SavedChartModel;
+
+    private readonly spaceModel: SpaceModel;
+
+    private readonly analyticsModel: AnalyticsModel;
+
+    private readonly pinnedListModel: PinnedListModel;
+
+    private readonly schedulerModel: SchedulerModel;
+
+    private readonly schedulerClient: SchedulerClient;
+
+    private readonly slackClient: SlackClient;
+
+    private readonly dashboardModel: DashboardModel;
+
+    private readonly catalogModel: CatalogModel;
+
+    private readonly permissionsService: PermissionsService;
+
+    private readonly googleDriveClient: GoogleDriveClient;
+
+    private readonly userService: UserService;
+
+    private readonly spacePermissionService: SpacePermissionService;
+
+    constructor(args: SavedChartServiceArguments) {
+        super();
+        this.analytics = args.analytics;
+        this.lightdashConfig = args.lightdashConfig;
+        this.projectModel = args.projectModel;
+        this.savedChartModel = args.savedChartModel;
+        this.spaceModel = args.spaceModel;
+        this.analyticsModel = args.analyticsModel;
+        this.pinnedListModel = args.pinnedListModel;
+        this.schedulerModel = args.schedulerModel;
+        this.schedulerClient = args.schedulerClient;
+        this.slackClient = args.slackClient;
+        this.dashboardModel = args.dashboardModel;
+        this.catalogModel = args.catalogModel;
+        this.permissionsService = args.permissionsService;
+        this.googleDriveClient = args.googleDriveClient;
+        this.userService = args.userService;
+        this.spacePermissionService = args.spacePermissionService;
+    }
+
+    private async checkUpdateAccess(
+        user: SessionUser,
+        chartUuid: string,
+    ): Promise<ChartSummary> {
+        const savedChart = await this.savedChartModel.getSummary(chartUuid);
+        const { organizationUuid, projectUuid } = savedChart;
+        const { access, isPrivate } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                savedChart.spaceUuid,
+            );
+        if (
+            user.ability.cannot(
+                'update',
+                subject('SavedChart', {
+                    organizationUuid,
+                    projectUuid,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+        return savedChart;
+    }
+
+    private async checkCreateScheduledDeliveryAccess(
+        user: SessionUser,
+        chartUuid: string,
+    ): Promise<ChartSummary> {
+        const savedChart = await this.savedChartModel.getSummary(chartUuid);
+        const { organizationUuid, projectUuid } = savedChart;
+        if (
+            user.ability.cannot(
+                'create',
+                subject('ScheduledDeliveries', {
+                    organizationUuid,
+                    projectUuid,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+        if (!(await this.hasChartSpaceAccess(user, savedChart.spaceUuid))) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+        return savedChart;
+    }
+
+    async hasChartSpaceAccess(
+        user: SessionUser,
+        spaceUuid: string,
+    ): Promise<boolean> {
+        try {
+            return await this.spacePermissionService.can(
+                'view',
+                user,
+                spaceUuid,
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    static getCreateEventProperties(
+        savedChart: SavedChartDAO,
+    ): CreateSavedChartVersionEvent['properties'] {
+        const echartsConfig =
+            savedChart.chartConfig.type === ChartType.CARTESIAN
+                ? savedChart.chartConfig.config?.eChartsConfig
+                : undefined;
+        const tableConfig =
+            savedChart.chartConfig.type === ChartType.TABLE
+                ? savedChart.chartConfig.config
+                : undefined;
+
+        return {
+            title: savedChart.name,
+            description: savedChart.description,
+            projectId: savedChart.projectUuid,
+            savedQueryId: savedChart.uuid,
+            dimensionsCount: savedChart.metricQuery.dimensions.length,
+            metricsCount: savedChart.metricQuery.metrics.length,
+            filtersCount: countTotalFilterRules(savedChart.metricQuery.filters),
+            sortsCount: savedChart.metricQuery.sorts.length,
+            tableCalculationsCount:
+                savedChart.metricQuery.tableCalculations.length,
+            pivotCount: (savedChart.pivotConfig?.columns || []).length,
+            chartType: savedChart.chartConfig.type,
+            pie:
+                savedChart.chartConfig.type === ChartType.PIE
+                    ? {
+                          isDonut:
+                              savedChart.chartConfig?.config?.isDonut ?? false,
+                      }
+                    : undefined,
+            funnel:
+                savedChart.chartConfig.type === ChartType.FUNNEL
+                    ? {
+                          dataInput: savedChart.chartConfig?.config?.dataInput,
+                      }
+                    : undefined,
+            table:
+                savedChart.chartConfig.type === ChartType.TABLE
+                    ? {
+                          conditionalFormattingRulesCount:
+                              tableConfig?.conditionalFormattings?.length || 0,
+                          hasMetricsAsRows: !!tableConfig?.metricsAsRows,
+                          hasRowCalculation: !!tableConfig?.showRowCalculation,
+                          hasColumnCalculations:
+                              !!tableConfig?.showColumnCalculation,
+                      }
+                    : undefined,
+
+            bigValue:
+                savedChart.chartConfig.type === ChartType.BIG_NUMBER
+                    ? {
+                          hasBigValueComparison:
+                              savedChart.chartConfig.config?.showComparison,
+                      }
+                    : undefined,
+            cartesian:
+                savedChart.chartConfig.type === ChartType.CARTESIAN
+                    ? {
+                          xAxisCount: (
+                              savedChart.chartConfig.config?.eChartsConfig
+                                  .xAxis || []
+                          ).length,
+                          yAxisCount: (
+                              savedChart.chartConfig.config?.eChartsConfig
+                                  .yAxis || []
+                          ).length,
+                          seriesTypes: (
+                              savedChart.chartConfig.config?.eChartsConfig
+                                  .series || []
+                          ).map(({ type }) => type),
+                          seriesCount: (
+                              savedChart.chartConfig.config?.eChartsConfig
+                                  .series || []
+                          ).length,
+                          referenceLinesCount:
+                              echartsConfig?.series?.filter(
+                                  (serie) => serie.markLine?.data !== undefined,
+                              ).length || 0,
+                          margins:
+                              echartsConfig?.grid?.top === undefined
+                                  ? 'default'
+                                  : 'custom',
+                          showLegend: echartsConfig?.legend?.show !== false,
+                          hasCustomTooltip:
+                              (echartsConfig?.tooltip || '').length > 0,
+                      }
+                    : undefined,
+            treemap:
+                savedChart.chartConfig.type === ChartType.TREEMAP
+                    ? {
+                          visibleMin: savedChart.chartConfig.config?.visibleMin,
+                          leafDepth: savedChart.chartConfig.config?.leafDepth,
+                          dimensionCount:
+                              savedChart.chartConfig.config?.groupFieldIds
+                                  ?.length || 0,
+                          startColor: savedChart.chartConfig.config?.startColor,
+                          endColor: savedChart.chartConfig.config?.endColor,
+                          useDynamicColors:
+                              savedChart.chartConfig.config?.useDynamicColors,
+                          startColorThreshold:
+                              savedChart.chartConfig.config
+                                  ?.startColorThreshold,
+                          endColorThreshold:
+                              savedChart.chartConfig.config?.endColorThreshold,
+                      }
+                    : undefined,
+            custom:
+                savedChart.chartConfig.type === ChartType.CUSTOM
+                    ? {
+                          size: JSON.stringify(
+                              savedChart.chartConfig.config?.spec || {},
+                          ).length,
+                          type:
+                              typeof savedChart.chartConfig.config?.spec
+                                  ?.mark === 'object'
+                                  ? JSON.stringify(
+                                        savedChart.chartConfig.config?.spec
+                                            ?.mark,
+                                    )
+                                  : `${savedChart.chartConfig.config?.spec?.mark}`,
+                      }
+                    : undefined,
+            parametersCount: Object.keys(savedChart.parameters || {}).length,
+            ...countCustomDimensionsInMetricQuery(savedChart.metricQuery),
+        };
+    }
+
+    static getConditionalFormattingEventProperties(
+        savedChart: SavedChartDAO,
+    ): ConditionalFormattingRuleSavedEvent['properties'][] | undefined {
+        if (
+            savedChart.chartConfig.type !== ChartType.TABLE ||
+            !savedChart.chartConfig.config?.conditionalFormattings ||
+            savedChart.chartConfig.config.conditionalFormattings.length === 0
+        ) {
+            return undefined;
+        }
+
+        const eventProperties =
+            savedChart.chartConfig.config.conditionalFormattings.map((rule) => {
+                let type: 'color range' | 'single color';
+                let numConditions: number;
+
+                if (isConditionalFormattingConfigWithColorRange(rule)) {
+                    type = 'color range';
+                    numConditions = 1;
+                } else if (isConditionalFormattingConfigWithSingleColor(rule)) {
+                    type = 'single color';
+                    numConditions = rule.rules.length;
+                } else {
+                    type = assertUnreachable(
+                        rule,
+                        'Unknown conditional formatting',
+                    );
+                    numConditions = 0;
+                }
+
+                return {
+                    projectId: savedChart.projectUuid,
+                    organizationId: savedChart.organizationUuid,
+                    savedQueryId: savedChart.uuid,
+                    type,
+                    numConditions,
+                };
+            });
+
+        return eventProperties;
+    }
+
+    private async updateChartFieldUsage(
+        projectUuid: string,
+        chartExplore: Explore | ExploreError,
+        chartFields: ChartFieldUpdates,
+    ) {
+        const fieldUsageChanges = await getChartFieldUsageChanges(
+            projectUuid,
+            chartExplore,
+            chartFields,
+            this.catalogModel.findTablesCachedExploreUuid.bind(
+                this.catalogModel,
+            ),
+        );
+
+        await this.catalogModel.updateFieldsChartUsage(
+            projectUuid,
+            fieldUsageChanges,
+        );
+    }
+
+    async createVersion(
+        user: SessionUser,
+        savedChartUuid: string,
+        data: CreateSavedChartVersion,
+    ): Promise<SavedChart> {
+        const {
+            organizationUuid,
+            projectUuid,
+            spaceUuid,
+            metricQuery: {
+                metrics: oldChartMetrics,
+                dimensions: oldChartDimensions,
+            },
+        } = await this.savedChartModel.get(savedChartUuid);
+
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                spaceUuid,
+            );
+
+        if (
+            user.ability.cannot(
+                'update',
+                subject('SavedChart', {
+                    organizationUuid,
+                    projectUuid,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        if (
+            data.metricQuery.customDimensions?.some(isCustomSqlDimension) &&
+            user.ability.cannot(
+                'manage',
+                subject('CustomSql', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError(
+                'User cannot save queries with custom SQL dimensions',
+            );
+        }
+
+        const savedChart = await this.savedChartModel.createVersion(
+            savedChartUuid,
+            data,
+            user,
+        );
+
+        this.analytics.track({
+            event: 'saved_chart_version.created',
+            userId: user.userUuid,
+            properties: SavedChartService.getCreateEventProperties(savedChart),
+        });
+
+        SavedChartService.getConditionalFormattingEventProperties(
+            savedChart,
+        )?.forEach((properties) => {
+            this.analytics.track({
+                event: 'conditional_formatting_rule.saved',
+                userId: user.userUuid,
+                properties,
+            });
+        });
+
+        try {
+            const cachedExplore = await this.projectModel.getExploreFromCache(
+                projectUuid,
+                savedChart.tableName,
+            );
+
+            await this.updateChartFieldUsage(projectUuid, cachedExplore, {
+                oldChartFields: {
+                    metrics: oldChartMetrics,
+                    dimensions: oldChartDimensions,
+                },
+                newChartFields: {
+                    metrics: data.metricQuery.metrics,
+                    dimensions: data.metricQuery.dimensions,
+                },
+            });
+        } catch (error) {
+            this.logger.error(
+                `Error updating chart field usage for chart ${savedChartUuid}`,
+                error,
+            );
+        }
+
+        return {
+            ...savedChart,
+            isPrivate,
+            access,
+        };
+    }
+
+    async update(
+        user: SessionUser,
+        savedChartUuid: string,
+        data: UpdateSavedChart,
+    ): Promise<SavedChart> {
+        const {
+            organizationUuid,
+            projectUuid,
+            spaceUuid,
+            dashboardUuid,
+            name,
+        } = await this.savedChartModel.getSummary(savedChartUuid);
+
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                spaceUuid,
+            );
+
+        if (
+            user.ability.cannot(
+                'update',
+                subject('SavedChart', {
+                    organizationUuid,
+                    projectUuid,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+
+        const savedChart = await this.savedChartModel.update(
+            savedChartUuid,
+            data,
+        );
+
+        const cachedExplore = await this.projectModel.getExploreFromCache(
+            projectUuid,
+            savedChart.tableName,
+        );
+        this.analytics.track({
+            event: 'saved_chart.updated',
+            userId: user.userUuid,
+            properties: {
+                projectId: savedChart.projectUuid,
+                savedQueryId: savedChartUuid,
+                dashboardId: savedChart.dashboardUuid ?? undefined,
+                virtualViewId:
+                    cachedExplore?.type === ExploreType.VIRTUAL
+                        ? cachedExplore.name
+                        : undefined,
+            },
+        });
+        if (dashboardUuid && !savedChart.dashboardUuid) {
+            this.analytics.track({
+                event: 'dashboard_chart.moved',
+                userId: user.userUuid,
+                properties: {
+                    projectId: savedChart.projectUuid,
+                    savedQueryId: savedChartUuid,
+                    dashboardId: dashboardUuid,
+                    spaceId: savedChart.spaceUuid,
+                },
+            });
+        }
+        return {
+            ...savedChart,
+            isPrivate,
+            access,
+        };
+    }
+
+    async togglePinning(
+        user: SessionUser,
+        savedChartUuid: string,
+    ): Promise<TogglePinnedItemInfo> {
+        const { organizationUuid, projectUuid, pinnedListUuid, spaceUuid } =
+            await this.savedChartModel.getSummary(savedChartUuid);
+
+        if (
+            user.ability.cannot(
+                'manage',
+                subject('PinnedItems', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        if (!(await this.hasChartSpaceAccess(user, spaceUuid))) {
+            throw new ForbiddenError();
+        }
+
+        if (pinnedListUuid) {
+            await this.pinnedListModel.deleteItem({
+                pinnedListUuid,
+                savedChartUuid,
+            });
+        } else {
+            await this.pinnedListModel.addItem({
+                projectUuid,
+                savedChartUuid,
+            });
+        }
+        const pinnedList =
+            await this.pinnedListModel.getPinnedListAndItems(projectUuid);
+
+        this.analytics.track({
+            event: 'pinned_list.updated',
+            userId: user.userUuid,
+            properties: {
+                projectId: projectUuid,
+                organizationId: organizationUuid,
+                location: 'homepage',
+                pinnedListId: pinnedList.pinnedListUuid,
+                pinnedItems: pinnedList.items,
+            },
+        });
+
+        return {
+            projectUuid,
+            spaceUuid,
+            pinnedListUuid: pinnedList.pinnedListUuid,
+            isPinned: !!pinnedList.items.find(
+                (item) => item.savedChartUuid === savedChartUuid,
+            ),
+        };
+    }
+
+    async updateMultiple(
+        user: SessionUser,
+        projectUuid: string,
+        data: UpdateMultipleSavedChart[],
+    ): Promise<SavedChart[]> {
+        const spaceAccessPromises = data.map(async (chart) => {
+            const { isPrivate, access, organizationUuid } =
+                await this.spacePermissionService.getSpaceAccessContext(
+                    user.userUuid,
+                    chart.spaceUuid,
+                );
+            return user.ability.can(
+                'update',
+                subject('SavedChart', {
+                    organizationUuid,
+                    projectUuid,
+                    isPrivate,
+                    access,
+                }),
+            );
+        });
+
+        const hasAllAccess = await Promise.all(spaceAccessPromises);
+        if (hasAllAccess.includes(false)) {
+            throw new ForbiddenError();
+        }
+
+        const savedChartsDaos = await this.savedChartModel.updateMultiple(data);
+        const savedCharts = await Promise.all(
+            savedChartsDaos.map(async (savedChart) => {
+                const { isPrivate, access } =
+                    await this.spacePermissionService.getSpaceAccessContext(
+                        user.userUuid,
+                        savedChart.spaceUuid,
+                    );
+                return {
+                    ...savedChart,
+                    isPrivate,
+                    access,
+                };
+            }),
+        );
+        this.analytics.track({
+            event: 'saved_chart.updated_multiple',
+            userId: user.userUuid,
+            properties: {
+                savedChartIds: data.map((chart) => chart.uuid),
+                projectId: projectUuid,
+            },
+        });
+        return savedCharts;
+    }
+
+    async delete(user: SessionUser, savedChartUuid: string): Promise<void> {
+        const {
+            organizationUuid,
+            projectUuid,
+            spaceUuid,
+            metricQuery: { metrics, dimensions },
+            tableName,
+        } = await this.savedChartModel.get(savedChartUuid);
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                spaceUuid,
+            );
+
+        if (
+            user.ability.cannot(
+                'delete',
+                subject('SavedChart', {
+                    organizationUuid,
+                    projectUuid,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        let deletedChart: SavedChartDAO;
+        if (this.lightdashConfig.softDelete.enabled) {
+            deletedChart = await this.savedChartModel.softDelete(
+                savedChartUuid,
+                user.userUuid,
+            );
+
+            await this.schedulerModel.softDeleteByChartUuid(
+                savedChartUuid,
+                user.userUuid,
+            );
+        } else {
+            deletedChart =
+                await this.savedChartModel.permanentDelete(savedChartUuid);
+        }
+
+        try {
+            const cachedExplore = await this.projectModel.getExploreFromCache(
+                projectUuid,
+                tableName,
+            );
+
+            await this.updateChartFieldUsage(projectUuid, cachedExplore, {
+                oldChartFields: {
+                    metrics,
+                    dimensions,
+                },
+                newChartFields: {
+                    metrics: [],
+                    dimensions: [],
+                },
+            });
+        } catch (error) {
+            this.logger.error(
+                `Error updating chart field usage for chart ${savedChartUuid}`,
+                error,
+            );
+        }
+
+        this.analytics.track({
+            event: 'saved_chart.deleted',
+            userId: user.userUuid,
+            properties: {
+                savedQueryId: deletedChart.uuid,
+                projectId: deletedChart.projectUuid,
+            },
+        });
+    }
+
+    async getViewStats(
+        user: SessionUser,
+        savedChartUuid: string,
+    ): Promise<ViewStatistics> {
+        const savedChart =
+            await this.savedChartModel.getSummary(savedChartUuid);
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                savedChart.spaceUuid,
+            );
+        if (
+            user.ability.cannot(
+                'view',
+                subject('SavedChart', {
+                    ...savedChart,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+        return this.analyticsModel.getChartViewStats(savedChartUuid);
+    }
+
+    private async checkPermissions(
+        account: Account,
+        space: Omit<SpaceSummary, 'userAccess'>,
+        savedChart: SavedChartDAO,
+    ): Promise<SpaceAccess[]> {
+        let access;
+        if (isJwtUser(account)) {
+            await this.permissionsService.checkEmbedPermissions(
+                account,
+                savedChart.uuid,
+            );
+            // We pass this access everytime, but we only define the ability
+            // rule for this chart only if the JWT is type: 'chart'.
+            // Dashboards won't have `access` defined in their abilityRules,
+            // so this CASL check will pass for them.
+            // TODO: Get all chartUuids for a given dashboard in the middleware.
+            //       https://linear.app/lightdash/issue/CENG-110/front-load-available-charts-for-dashboard-requests
+            access = [{ chartUuid: savedChart.uuid }];
+        } else {
+            const { access: spaceAccess } =
+                await this.spacePermissionService.getSpaceAccessContext(
+                    account.user.userUuid,
+                    savedChart.spaceUuid,
+                );
+
+            access = spaceAccess;
+        }
+
+        if (
+            account.user.ability.cannot(
+                'view',
+                subject('SavedChart', {
+                    ...savedChart,
+                    isPrivate: space.isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+
+        return isJwtUser(account) ? [] : (access as SpaceAccess[]);
+    }
+
+    async get(
+        savedChartUuidOrSlug: string,
+        account: Account,
+    ): Promise<SavedChart> {
+        const savedChart = await this.savedChartModel.get(savedChartUuidOrSlug);
+        const space = await this.spaceModel.getSpaceSummary(
+            savedChart.spaceUuid,
+        );
+
+        const access = await this.checkPermissions(account, space, savedChart);
+
+        await this.analyticsModel.addChartViewEvent(
+            savedChart.uuid,
+            account.isRegisteredUser() ? account.user.id : null,
+        );
+
+        this.analytics.trackAccount(account, {
+            event: 'saved_chart.view',
+            properties: {
+                savedChartId: savedChart.uuid,
+                organizationId: savedChart.organizationUuid,
+                projectId: savedChart.projectUuid,
+                parametersCount: Object.keys(savedChart.parameters || {})
+                    .length,
+            },
+        });
+
+        return {
+            ...savedChart,
+            isPrivate: space.isPrivate,
+            access,
+        };
+    }
+
+    async create(
+        user: SessionUser,
+        projectUuid: string,
+        savedChart: CreateSavedChart,
+    ): Promise<SavedChart> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+        let isPrivate = false;
+        let access: SpaceAccess[] = [];
+        if (savedChart.spaceUuid) {
+            const spaceAccessContext =
+                await this.spacePermissionService.getSpaceAccessContext(
+                    user.userUuid,
+                    savedChart.spaceUuid,
+                );
+            isPrivate = spaceAccessContext.isPrivate;
+            access = spaceAccessContext.access;
+        } else if (savedChart.dashboardUuid) {
+            const dashboard = await this.dashboardModel.getByIdOrSlug(
+                savedChart.dashboardUuid,
+            );
+            const dashboardSpaceAccessContext =
+                await this.spacePermissionService.getSpaceAccessContext(
+                    user.userUuid,
+                    dashboard.spaceUuid,
+                );
+            isPrivate = dashboardSpaceAccessContext.isPrivate;
+            access = dashboardSpaceAccessContext.access;
+        }
+
+        if (
+            user.ability.cannot(
+                'create',
+                subject('SavedChart', {
+                    organizationUuid,
+                    projectUuid,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        const newSavedChart = await this.savedChartModel.create(
+            projectUuid,
+            user.userUuid,
+            {
+                ...savedChart,
+                slug: generateSlug(savedChart.name),
+                updatedByUser: user,
+            },
+        );
+
+        const cachedExplore = await this.projectModel.getExploreFromCache(
+            projectUuid,
+            savedChart.tableName,
+        );
+
+        this.analytics.track({
+            event: 'saved_chart.created',
+            userId: user.userUuid,
+            properties: {
+                ...SavedChartService.getCreateEventProperties(newSavedChart),
+                dashboardId: newSavedChart.dashboardUuid ?? undefined,
+                virtualViewId:
+                    cachedExplore?.type === ExploreType.VIRTUAL
+                        ? cachedExplore.name
+                        : undefined,
+            },
+        });
+
+        SavedChartService.getConditionalFormattingEventProperties(
+            newSavedChart,
+        )?.forEach((properties) => {
+            this.analytics.track({
+                event: 'conditional_formatting_rule.saved',
+                userId: user.userUuid,
+                properties,
+            });
+        });
+
+        try {
+            await this.updateChartFieldUsage(projectUuid, cachedExplore, {
+                oldChartFields: {
+                    metrics: [],
+                    dimensions: [],
+                },
+                newChartFields: {
+                    metrics: newSavedChart.metricQuery.metrics,
+                    dimensions: newSavedChart.metricQuery.dimensions,
+                },
+            });
+        } catch (error) {
+            this.logger.error(
+                `Error updating chart field usage for chart ${newSavedChart.uuid}`,
+                error,
+            );
+        }
+
+        return { ...newSavedChart, isPrivate, access };
+    }
+
+    async duplicate(
+        user: SessionUser,
+        projectUuid: string,
+        chartUuid: string,
+        data: { chartName: string; chartDesc: string },
+    ): Promise<SavedChart> {
+        const chart = await this.savedChartModel.get(chartUuid);
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                chart.spaceUuid,
+            );
+        if (
+            user.ability.cannot(
+                'create',
+                subject('SavedChart', {
+                    ...chart,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+        let duplicatedChart: CreateSavedChart & {
+            updatedByUser: UpdatedByUser;
+            slug: string;
+        };
+
+        const base = {
+            ...chart,
+            name: data.chartName,
+            description: data.chartDesc,
+            updatedByUser: user,
+            slug: generateSlug(`${data.chartName} ${Date.now()}`), // Ensure unique slug for duplicated charts
+        };
+        if (chart.dashboardUuid) {
+            duplicatedChart = {
+                ...base,
+                dashboardUuid: chart.dashboardUuid,
+                spaceUuid: null,
+            };
+        } else {
+            duplicatedChart = {
+                ...base,
+                dashboardUuid: null,
+            };
+        }
+
+        const newSavedChart = await this.savedChartModel.create(
+            projectUuid,
+            user.userUuid,
+            duplicatedChart,
+        );
+        const newSavedChartProperties =
+            SavedChartService.getCreateEventProperties(newSavedChart);
+
+        const cachedExplore = await this.projectModel.getExploreFromCache(
+            projectUuid,
+            newSavedChart.tableName,
+        );
+
+        this.analytics.track({
+            event: 'saved_chart.created',
+            userId: user.userUuid,
+            properties: {
+                ...newSavedChartProperties,
+                duplicated: true,
+                dashboardId: newSavedChart.dashboardUuid ?? undefined,
+                virtualViewId:
+                    cachedExplore?.type === ExploreType.VIRTUAL
+                        ? cachedExplore.name
+                        : undefined,
+            },
+        });
+
+        this.analytics.track({
+            event: 'duplicated_chart_created',
+            userId: user.userUuid,
+            properties: {
+                ...newSavedChartProperties,
+                newSavedQueryId: newSavedChartProperties.savedQueryId,
+                duplicateOfSavedQueryId: chartUuid,
+            },
+        });
+
+        try {
+            await this.updateChartFieldUsage(projectUuid, cachedExplore, {
+                oldChartFields: {
+                    metrics: [],
+                    dimensions: [],
+                },
+                newChartFields: {
+                    metrics: newSavedChart.metricQuery.metrics,
+                    dimensions: newSavedChart.metricQuery.dimensions,
+                },
+            });
+        } catch (error) {
+            this.logger.error(
+                `Error updating chart field usage for chart ${newSavedChart.uuid}`,
+                error,
+            );
+        }
+
+        return {
+            ...newSavedChart,
+            isPrivate,
+            access,
+        };
+    }
+
+    async getSchedulers(
+        user: SessionUser,
+        chartUuid: string,
+        searchQuery?: string,
+        paginateArgs?: KnexPaginateArgs,
+        filters?: {
+            formats?: string[];
+        },
+    ): Promise<KnexPaginatedData<SchedulerAndTargets[]>> {
+        const chart = await this.checkCreateScheduledDeliveryAccess(
+            user,
+            chartUuid,
+        );
+        return this.schedulerModel.getSchedulers({
+            projectUuid: chart.projectUuid,
+            paginateArgs,
+            searchQuery,
+            filters: {
+                resourceType: 'chart',
+                resourceUuids: [chartUuid],
+                formats: filters?.formats,
+            },
+        });
+    }
+
+    async createScheduler(
+        user: SessionUser,
+        chartUuid: string,
+        newScheduler: CreateSchedulerAndTargetsWithoutIds,
+    ): Promise<SchedulerAndTargets> {
+        if (!isUserWithOrg(user)) {
+            throw new ForbiddenError('User is not part of an organization');
+        }
+
+        if (!isValidFrequency(newScheduler.cron)) {
+            throw new ParameterError(
+                'Frequency not allowed, custom input is limited to hourly',
+            );
+        }
+
+        if (!isValidTimezone(newScheduler.timezone)) {
+            throw new ParameterError('Timezone string is not valid');
+        }
+
+        if (!newScheduler.targets || !Array.isArray(newScheduler.targets)) {
+            throw new ParameterError(
+                'Targets is required and must be an array',
+            );
+        }
+
+        // Validate Google Sheets file if format is GSHEETS
+        if (newScheduler.format === SchedulerFormat.GSHEETS) {
+            if (!isSchedulerGsheetsOptions(newScheduler.options)) {
+                throw new ParameterError(
+                    'Google Sheets format requires valid gsheets options',
+                );
+            }
+
+            try {
+                const refreshToken = await this.userService.getRefreshToken(
+                    user.userUuid,
+                );
+                await this.googleDriveClient.assertFileIsGoogleSheet(
+                    refreshToken,
+                    newScheduler.options.gdriveId,
+                );
+            } catch (error) {
+                if (error instanceof UnexpectedGoogleSheetsError) {
+                    throw error; // Already has clear user-facing message
+                }
+                if (error instanceof GoogleSheetsTransientError) {
+                    throw error; // Allow transient errors to propagate for retry
+                }
+                throw new MissingConfigError(
+                    'Unable to validate Google Sheets file. Please ensure you have connected your Google account.',
+                );
+            }
+        }
+
+        const { projectUuid, organizationUuid } =
+            await this.checkCreateScheduledDeliveryAccess(user, chartUuid);
+        const scheduler = await this.schedulerModel.createScheduler({
+            ...newScheduler,
+            createdBy: user.userUuid,
+            dashboardUuid: null,
+            savedChartUuid: chartUuid,
+        });
+
+        const createSchedulerEventData: SchedulerUpsertEvent = {
+            userId: user.userUuid,
+            event: 'scheduler.created',
+            properties: {
+                projectId: projectUuid,
+                organizationId: organizationUuid,
+                schedulerId: scheduler.schedulerUuid,
+                resourceType: isChartScheduler(scheduler)
+                    ? 'chart'
+                    : 'dashboard',
+                cronExpression: scheduler.cron,
+                format: scheduler.format,
+                cronString: cronstrue.toString(scheduler.cron, {
+                    verbose: true,
+                    throwExceptionOnParseError: false,
+                }),
+                resourceId: isChartScheduler(scheduler)
+                    ? scheduler.savedChartUuid
+                    : scheduler.dashboardUuid,
+                targets:
+                    scheduler.format === SchedulerFormat.GSHEETS
+                        ? []
+                        : scheduler.targets.map(getSchedulerTargetType),
+                timeZone: getTimezoneLabel(scheduler.timezone),
+                includeLinks: scheduler.includeLinks,
+            },
+        };
+        this.analytics.track(createSchedulerEventData);
+
+        await this.slackClient.joinChannels(
+            user.organizationUuid,
+            SchedulerModel.getSlackChannels(scheduler.targets),
+        );
+
+        const { schedulerTimezone: defaultTimezone } =
+            await this.projectModel.get(projectUuid);
+
+        await this.schedulerClient.generateDailyJobsForScheduler(
+            scheduler,
+            {
+                organizationUuid,
+                projectUuid,
+                userUuid: user.userUuid,
+            },
+            defaultTimezone,
+        );
+
+        return scheduler;
+    }
+
+    async getHistory(
+        user: SessionUser,
+        chartUuid: string,
+    ): Promise<ChartHistory> {
+        const chart = await this.savedChartModel.getSummary(chartUuid);
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                chart.spaceUuid,
+            );
+
+        if (
+            user.ability.cannot(
+                'view',
+                subject('SavedChart', {
+                    ...chart,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+        const versions =
+            await this.savedChartModel.getLatestVersionSummaries(chartUuid);
+        this.analytics.track({
+            event: 'saved_chart_history.view',
+            userId: user.userUuid,
+            properties: {
+                projectId: chart.projectUuid,
+                savedQueryId: chart.uuid,
+                versionCount: versions.length,
+            },
+        });
+        return {
+            history: versions,
+        };
+    }
+
+    async getVersion(
+        user: SessionUser,
+        chartUuid: string,
+        versionUuid: string,
+    ): Promise<ChartVersion> {
+        const chart = await this.savedChartModel.getSummary(chartUuid);
+        const { isPrivate, access } =
+            await this.spacePermissionService.getSpaceAccessContext(
+                user.userUuid,
+                chart.spaceUuid,
+            );
+        if (
+            user.ability.cannot(
+                'view',
+                subject('SavedChart', {
+                    ...chart,
+                    isPrivate,
+                    access,
+                }),
+            )
+        ) {
+            throw new ForbiddenError(
+                "You don't have access to the space this chart belongs to",
+            );
+        }
+
+        const [chartVersionSummary, savedChart] = await Promise.all([
+            this.savedChartModel.getVersionSummary(chartUuid, versionUuid),
+            this.savedChartModel.get(chartUuid, versionUuid),
+        ]);
+
+        this.analytics.track({
+            event: 'saved_chart_version.view',
+            userId: user.userUuid,
+            properties: {
+                projectId: chart.projectUuid,
+                savedQueryId: chart.uuid,
+                versionId: versionUuid,
+            },
+        });
+
+        return {
+            ...chartVersionSummary,
+            chart: {
+                ...savedChart,
+                isPrivate,
+                access,
+            },
+        };
+    }
+
+    async rollback(
+        user: SessionUser,
+        chartUuid: string,
+        versionUuid: string,
+    ): Promise<void> {
+        await this.checkUpdateAccess(user, chartUuid);
+        const currentChartVersion = await this.savedChartModel.get(chartUuid);
+        const chartVersion = await this.savedChartModel.get(
+            chartUuid,
+            versionUuid,
+        );
+        const newChartVersion = await this.savedChartModel.createVersion(
+            chartUuid,
+            chartVersion,
+            user,
+        );
+        this.analytics.track({
+            event: 'saved_chart_version.rollback',
+            userId: user.userUuid,
+            properties: {
+                projectId: newChartVersion.projectUuid,
+                savedQueryId: newChartVersion.uuid,
+                versionId: versionUuid,
+            },
+        });
+        this.analytics.track({
+            event: 'saved_chart_version.created',
+            userId: user.userUuid,
+            properties:
+                SavedChartService.getCreateEventProperties(newChartVersion),
+        });
+
+        try {
+            const cachedExplore = await this.projectModel.getExploreFromCache(
+                newChartVersion.projectUuid,
+                newChartVersion.tableName,
+            );
+
+            await this.updateChartFieldUsage(
+                newChartVersion.projectUuid,
+                cachedExplore,
+                {
+                    oldChartFields: {
+                        metrics: currentChartVersion.metricQuery.metrics,
+                        dimensions: currentChartVersion.metricQuery.dimensions,
+                    },
+                    newChartFields: {
+                        metrics: newChartVersion.metricQuery.metrics,
+                        dimensions: newChartVersion.metricQuery.dimensions,
+                    },
+                },
+            );
+        } catch (error) {
+            this.logger.error(
+                `Error updating chart field usage for chart ${newChartVersion.uuid}`,
+                error,
+            );
+        }
+    }
+
+    async hasAccess(
+        action: AbilityAction,
+        actor: {
+            user: SessionUser;
+            projectUuid: string;
+        },
+        resource:
+            | {
+                  savedChartUuid: null;
+                  spaceUuid: string;
+              }
+            | {
+                  savedChartUuid: string;
+                  spaceUuid?: string;
+              },
+    ): Promise<SpaceAccess[]> {
+        let { spaceUuid } = resource;
+
+        if (resource.savedChartUuid !== null) {
+            const savedChart = await this.savedChartModel.getSummary(
+                resource.savedChartUuid,
+            );
+
+            if (!savedChart) {
+                throw new NotFoundError('Chart not found');
+            }
+
+            if (savedChart.dashboardUuid) {
+                const dashboard = await this.dashboardModel.getByIdOrSlug(
+                    savedChart.dashboardUuid,
+                );
+                spaceUuid = dashboard.spaceUuid;
+            } else {
+                spaceUuid = savedChart.spaceUuid;
+            }
+        }
+
+        if (!spaceUuid) {
+            throw new NotFoundError('Space is required');
+        }
+
+        const {
+            access: spaceAccess,
+            isPrivate,
+            organizationUuid,
+        } = await this.spacePermissionService.getSpaceAccessContext(
+            actor.user.userUuid,
+            spaceUuid,
+        );
+
+        const hasPermission = actor.user.ability.can(
+            action,
+            subject('SavedChart', {
+                organizationUuid,
+                projectUuid: actor.projectUuid,
+                isPrivate,
+                access: spaceAccess,
+            }),
+        );
+
+        if (!hasPermission) {
+            throw new ForbiddenError(
+                `You don't have access to ${action} this Chart`,
+            );
+        }
+
+        if (resource.spaceUuid && spaceUuid !== resource.spaceUuid) {
+            const {
+                isPrivate: newSpaceIsPrivate,
+                access: newSpaceAccess,
+                organizationUuid: newSpaceOrganizationUuid,
+            } = await this.spacePermissionService.getSpaceAccessContext(
+                actor.user.userUuid,
+                resource.spaceUuid,
+            );
+
+            const hasPermissionInNewSpace = actor.user.ability.can(
+                action,
+                subject('SavedChart', {
+                    organizationUuid: newSpaceOrganizationUuid,
+                    projectUuid: actor.projectUuid,
+                    isPrivate: newSpaceIsPrivate,
+                    access: newSpaceAccess,
+                }),
+            );
+
+            if (!hasPermissionInNewSpace) {
+                throw new ForbiddenError(
+                    `You don't have access to ${action} this Chart in the new space`,
+                );
+            }
+        }
+
+        return spaceAccess;
+    }
+
+    async moveToSpace(
+        user: SessionUser,
+        {
+            projectUuid,
+            itemUuid: savedChartUuid,
+            targetSpaceUuid,
+        }: {
+            projectUuid: string;
+            itemUuid: string;
+            targetSpaceUuid: string | null;
+        },
+        {
+            tx,
+            checkForAccess = true,
+            trackEvent = true,
+        }: {
+            tx?: Knex;
+            checkForAccess?: boolean;
+            trackEvent?: boolean;
+        } = {},
+    ): Promise<void> {
+        if (!targetSpaceUuid) {
+            throw new ParameterError(
+                'You cannot move a chart outside of a space',
+            );
+        }
+
+        if (checkForAccess) {
+            await this.hasAccess(
+                'update',
+                { user, projectUuid },
+                { savedChartUuid },
+            );
+        }
+
+        await this.savedChartModel.moveToSpace(
+            { projectUuid, itemUuid: savedChartUuid, targetSpaceUuid },
+            { tx },
+        );
+
+        if (trackEvent) {
+            this.analytics.track({
+                event: 'saved_chart.moved',
+                userId: user.userUuid,
+                properties: {
+                    projectId: projectUuid,
+                    savedChartId: savedChartUuid,
+                    newSpaceId: targetSpaceUuid,
+                },
+            });
+        }
+    }
+
+    /**
+     * Get deleted charts for a project
+     * Admins see all deleted charts, non-admins see only their own
+     */
+    async getDeletedCharts(
+        user: SessionUser,
+        projectUuid: string,
+        filters: DeletedContentFilters,
+        paginateArgs?: KnexPaginateArgs,
+    ): Promise<KnexPaginatedData<DeletedChartContentSummary[]>> {
+        const { organizationUuid } =
+            await this.projectModel.getSummary(projectUuid);
+
+        // Check if user can view the project
+        if (
+            user.ability.cannot(
+                'view',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        // Check if user is admin (can manage all deleted content)
+        const isAdmin = user.ability.can(
+            'manage',
+            subject('DeletedContent', { organizationUuid, projectUuid }),
+        );
+
+        // Non-admins can only see their own deleted items
+        const userUuidFilter = isAdmin ? undefined : user.userUuid;
+
+        return this.savedChartModel.getDeletedCharts(
+            projectUuid,
+            filters,
+            paginateArgs,
+            userUuidFilter,
+        );
+    }
+
+    /**
+     * Restore a soft-deleted chart
+     * Admins can restore any, non-admins can only restore their own
+     */
+    async restoreChart(user: SessionUser, chartUuid: string): Promise<void> {
+        const deletedChart = await this.savedChartModel.get(
+            chartUuid,
+            undefined,
+            { deleted: true },
+        );
+        const { organizationUuid, projectUuid } = deletedChart;
+
+        // Check if user can view the project
+        if (
+            user.ability.cannot(
+                'view',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        // Check if user is admin
+        const isAdmin = user.ability.can(
+            'manage',
+            subject('DeletedContent', { organizationUuid, projectUuid }),
+        );
+
+        // Non-admins can only restore their own items
+        if (!isAdmin && deletedChart.deletedBy?.userUuid !== user.userUuid) {
+            throw new ForbiddenError(
+                'You can only restore content you deleted',
+            );
+        }
+
+        await this.savedChartModel.restore(chartUuid);
+
+        // Cascade: restore associated schedulers
+        await this.schedulerModel.restoreByChartUuid(chartUuid);
+
+        this.analytics.track({
+            event: 'saved_chart.restored',
+            userId: user.userUuid,
+            properties: {
+                savedQueryId: chartUuid,
+                projectId: projectUuid,
+            },
+        });
+    }
+
+    /**
+     * Permanently delete a soft-deleted chart
+     * Admins can delete any, non-admins can only delete their own
+     */
+    async permanentlyDeleteChart(
+        user: SessionUser,
+        chartUuid: string,
+    ): Promise<void> {
+        const deletedChart = await this.savedChartModel.get(
+            chartUuid,
+            undefined,
+            { deleted: true },
+        );
+        const { organizationUuid, projectUuid } = deletedChart;
+
+        // Check if user can view the project
+        if (
+            user.ability.cannot(
+                'view',
+                subject('Project', { organizationUuid, projectUuid }),
+            )
+        ) {
+            throw new ForbiddenError();
+        }
+
+        // Check if user is admin
+        const isAdmin = user.ability.can(
+            'manage',
+            subject('DeletedContent', { organizationUuid, projectUuid }),
+        );
+
+        // Non-admins can only permanently delete their own items
+        if (!isAdmin && deletedChart.deletedBy?.userUuid !== user.userUuid) {
+            throw new ForbiddenError(
+                'You can only permanently delete content you deleted',
+            );
+        }
+
+        await this.savedChartModel.permanentDelete(chartUuid);
+
+        this.analytics.track({
+            event: 'saved_chart.permanently_deleted',
+            userId: user.userUuid,
+            properties: {
+                savedQueryId: chartUuid,
+                projectId: projectUuid,
+            },
+        });
+    }
+}

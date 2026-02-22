@@ -1,0 +1,100 @@
+with source as (
+
+    {#-
+    Normally we would select from the table here, but we are using seeds to load
+    our data in this project
+    #}
+    select * from {{ ref('raw_technicians') }}
+
+),
+
+renamed as (
+
+    select
+        technician_id,
+        employee_id,
+        first_name,
+        last_name,
+        email,
+        phone,
+        {{ cast_date('hire_date') }} as hire_date,
+        employment_status,
+        employment_type,
+        department,
+        job_title,
+        seniority_level,
+        {{ cast_integer('supervisor_id') }} as supervisor_id,
+        {{ cast_numeric('base_salary') }} as base_salary,
+        {{ cast_numeric('hourly_rate') }} as hourly_rate,
+        {{ cast_numeric('overtime_rate') }} as overtime_rate,
+        primary_trade,
+        secondary_trade,
+        specialization,
+        {{ cast_boolean('certification_hvac') }} as certification_hvac,
+        {{ cast_boolean('certification_electrical') }} as certification_electrical,
+        {{ cast_boolean('certification_plumbing') }} as certification_plumbing,
+        {{ cast_boolean('certification_fire_safety') }} as certification_fire_safety,
+        {{ cast_boolean('certification_elevator') }} as certification_elevator,
+        license_number,
+        {{ cast_date('license_expiry') }} as license_expiry,
+        {{ cast_date('background_check_date') }} as background_check_date,
+        {{ cast_date('drug_test_date') }} as drug_test_date,
+        home_address_city,
+        home_address_state,
+        assigned_territory,
+        {{ cast_integer('service_area_radius_miles') }} as service_area_radius_miles,
+        {{ cast_numeric('current_location_lat') }} as current_location_lat,
+        {{ cast_numeric('current_location_lon') }} as current_location_lon,
+        availability_status,
+        {{ cast_time('shift_start') }} as shift_start,
+        {{ cast_time('shift_end') }} as shift_end,
+        {{ cast_boolean('on_call_today') }} as on_call_today,
+        {{ cast_boolean('weekend_availability') }} as weekend_availability,
+        {{ cast_boolean('after_hours_availability') }} as after_hours_availability,
+        {{ cast_numeric('average_rating') }} as average_rating,
+        {{ cast_integer('total_ratings') }} as total_ratings,
+        {{ cast_integer('total_work_orders') }} as total_work_orders,
+        {{ cast_integer('completed_work_orders') }} as completed_work_orders,
+        {{ cast_integer('in_progress_work_orders') }} as in_progress_work_orders,
+        {{ cast_integer('cancelled_work_orders') }} as cancelled_work_orders,
+        {{ cast_numeric('average_resolution_time_hours') }} as average_resolution_time_hours,
+        {{ cast_numeric('first_time_fix_rate') }} as first_time_fix_rate,
+        {{ cast_numeric('customer_satisfaction_score') }} as customer_satisfaction_score,
+        {{ cast_integer('response_time_avg_minutes') }} as response_time_avg_minutes,
+        {{ cast_numeric('utilization_rate') }} as utilization_rate,
+        {{ cast_numeric('billable_hours_ytd') }} as billable_hours_ytd,
+        {{ cast_numeric('non_billable_hours_ytd') }} as non_billable_hours_ytd,
+        {{ cast_numeric('overtime_hours_ytd') }} as overtime_hours_ytd,
+        {{ cast_integer('sick_days_ytd') }} as sick_days_ytd,
+        {{ cast_integer('vacation_days_ytd') }} as vacation_days_ytd,
+        {{ cast_integer('training_hours_ytd') }} as training_hours_ytd,
+        skills_hvac_level,
+        skills_electrical_level,
+        skills_plumbing_level,
+        skills_carpentry_level,
+        skills_painting_level,
+        skills_roofing_level,
+        {{ cast_integer('tools_assigned_count') }} as tools_assigned_count,
+        {{ cast_boolean('vehicle_assigned') }} as vehicle_assigned,
+        vehicle_number,
+        vehicle_type,
+        {{ cast_integer('vehicle_mileage') }} as vehicle_mileage,
+        {{ cast_date('last_safety_training') }} as last_safety_training,
+        {{ cast_date('last_technical_training') }} as last_technical_training,
+        {{ cast_integer('performance_score') }} as performance_score,
+        {{ cast_integer('productivity_score') }} as productivity_score,
+        {{ cast_integer('quality_score') }} as quality_score,
+        {{ cast_integer('attendance_score') }} as attendance_score,
+        {{ cast_integer('years_experience') }} as years_experience,
+        {{ cast_integer('total_certifications') }} as total_certifications,
+        languages_spoken,
+        emergency_contact_name,
+        emergency_contact_phone,
+        uniform_size,
+        equipment_issued
+
+    from source
+
+)
+
+select * from renamed

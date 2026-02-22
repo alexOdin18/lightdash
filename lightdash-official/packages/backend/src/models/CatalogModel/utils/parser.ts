@@ -1,0 +1,171 @@
+import {
+    CatalogField,
+    CatalogItemIcon,
+    CatalogOwner,
+    CatalogTable,
+    CatalogType,
+    CompiledDimension,
+    CompiledMetric,
+    CompiledTable,
+    convertToAiHints,
+    Explore,
+    getBasicType,
+    isMetric,
+    type Tag,
+} from '@lightdash/common';
+import { DbCatalog } from '../../../database/entities/catalog';
+
+const parseFieldFromMetricOrDimension = (
+    table: CompiledTable,
+    field: CompiledMetric | CompiledDimension,
+    catalogArgs: {
+        label: string | null;
+        description: string | null;
+        catalogSearchUuid: string;
+        tags: string[];
+        categories: Pick<Tag, 'tagUuid' | 'color' | 'name' | 'yamlReference'>[];
+        requiredAttributes: Record<string, string | string[]> | undefined;
+        chartUsage: number | undefined;
+        icon: CatalogItemIcon | null;
+        searchRank?: number;
+        owner: CatalogOwner | null;
+    },
+): CatalogField => ({
+    name: field.name,
+    label: catalogArgs.label ?? '',
+    description: catalogArgs.description ?? '',
+    tableLabel: field.tableLabel,
+    tableName: table.name,
+    tableGroupLabel: table.groupLabel,
+    fieldType: field.fieldType,
+    basicType: getBasicType(field),
+    fieldValueType: field.type,
+    type: CatalogType.Field,
+    aiHints: convertToAiHints(field.aiHint) ?? null,
+    requiredAttributes: catalogArgs.requiredAttributes,
+    tags: catalogArgs.tags,
+    categories: catalogArgs.categories,
+    chartUsage: catalogArgs.chartUsage,
+    catalogSearchUuid: catalogArgs.catalogSearchUuid,
+    icon: catalogArgs.icon,
+    searchRank: catalogArgs.searchRank,
+    owner: catalogArgs.owner,
+    ...(isMetric(field) && field.spotlight?.filterBy
+        ? { spotlightFilterBy: field.spotlight.filterBy }
+        : {}),
+    ...(isMetric(field) && field.spotlight?.segmentBy
+        ? { spotlightSegmentBy: field.spotlight.segmentBy }
+        : {}),
+});
+
+export const parseFieldsFromCompiledTable = (
+    table: CompiledTable,
+): CatalogField[] => {
+    const tableFields = [
+        ...Object.values(table.dimensions).filter((d) => !d.isIntervalBase),
+        ...Object.values(table.metrics),
+    ].filter((f) => !f.hidden); // Filter out hidden fields from catalog
+    return tableFields.map((field) =>
+        parseFieldFromMetricOrDimension(table, field, {
+            label: field.label,
+            description: field.description ?? '',
+            tags: [],
+            categories: [],
+            requiredAttributes:
+                field.requiredAttributes ?? table.requiredAttributes,
+            // ! since we're not pulling from the catalog search table these do not exist (keep compatibility with data catalog)
+            chartUsage: undefined,
+            catalogSearchUuid: '',
+            icon: null,
+            owner: null, // Not resolved until indexed
+        }),
+    );
+};
+
+export const parseCatalog = (
+    dbCatalog: DbCatalog & {
+        explore: Explore;
+        catalog_tags: Pick<
+            Tag,
+            'tagUuid' | 'name' | 'color' | 'yamlReference'
+        >[];
+        search_rank: number;
+        owner_first_name?: string;
+        owner_last_name?: string;
+        owner_email?: string;
+    },
+): CatalogTable | CatalogField | null => {
+    // Construct owner object from joined user data
+    const owner: CatalogOwner | null =
+        dbCatalog.owner_user_uuid &&
+        dbCatalog.owner_first_name &&
+        dbCatalog.owner_last_name &&
+        dbCatalog.owner_email
+            ? {
+                  userUuid: dbCatalog.owner_user_uuid,
+                  firstName: dbCatalog.owner_first_name,
+                  lastName: dbCatalog.owner_last_name,
+                  email: dbCatalog.owner_email,
+              }
+            : null;
+    const baseTable = dbCatalog.explore.tables[dbCatalog.explore.baseTable];
+
+    if (dbCatalog.type === CatalogType.Table) {
+        return {
+            catalogSearchUuid: dbCatalog.catalog_search_uuid,
+            name: dbCatalog.name,
+            label: dbCatalog.label ?? dbCatalog.explore.label,
+            groupLabel: dbCatalog.explore.groupLabel,
+            description: dbCatalog.description || undefined,
+            type: CatalogType.Table,
+            requiredAttributes: dbCatalog.required_attributes ?? undefined,
+            tags: dbCatalog.explore.tags,
+            categories: dbCatalog.catalog_tags,
+            chartUsage: dbCatalog.chart_usage ?? undefined,
+            icon: dbCatalog.icon ?? null,
+            aiHints: convertToAiHints(dbCatalog.explore.aiHint) ?? null,
+            joinedTables: dbCatalog.joined_tables ?? null,
+            searchRank: dbCatalog.search_rank,
+        };
+    }
+
+    // Find the correct table that contains this field
+    // This is important for fields from joined tables which may not be in the base table
+    const catalogTable = dbCatalog.explore.tables[dbCatalog.table_name];
+
+    if (!catalogTable) {
+        // Table exists in catalog but not in the current explore definition.
+        // This can happen when a joined table is removed from the explore but the catalog
+        // hasn't been fully re-indexed yet. Return null to skip this stale entry.
+        return null;
+    }
+
+    const dimensionsAndMetrics = [
+        ...Object.values(catalogTable.dimensions),
+        ...Object.values(catalogTable.metrics),
+    ];
+    // This is the most computationally expensive part of the code
+    // Perhaps we should add metadata (requiredAttributes) to the catalog database
+    // or cache this somehow
+    const findField = dimensionsAndMetrics.find(
+        (d) => d.name === dbCatalog.name,
+    );
+    if (!findField) {
+        // Field exists in catalog but not in the current explore definition.
+        // This can happen when a field is removed from the dbt/YAML model but the catalog
+        // hasn't been fully re-indexed yet. Return null to skip this stale entry.
+        return null;
+    }
+    return parseFieldFromMetricOrDimension(catalogTable, findField, {
+        label: dbCatalog.label,
+        description: dbCatalog.description,
+        catalogSearchUuid: dbCatalog.catalog_search_uuid,
+        tags: dbCatalog.explore.tags,
+        categories: dbCatalog.catalog_tags,
+        requiredAttributes: dbCatalog.required_attributes ?? undefined,
+        chartUsage: dbCatalog.chart_usage ?? 0,
+        icon: dbCatalog.icon ?? null,
+        searchRank: dbCatalog.search_rank,
+        owner,
+    });
+};

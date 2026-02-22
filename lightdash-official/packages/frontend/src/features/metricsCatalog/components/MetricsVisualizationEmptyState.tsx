@@ -1,0 +1,35 @@
+import { Center, Paper, Stack, Text } from '@mantine-8/core';
+import { IconClockCancel } from '@tabler/icons-react';
+import { BackgroundSvg } from '../../../components/common/BackgroundSvg';
+import MantineIcon from '../../../components/common/MantineIcon';
+import MetricsVisualizationEmptyStateImage from '../../../svgs/metricsCatalog/metrics-visualization-empty-state.svg?react';
+import classes from './MetricsVisualizationEmptyState.module.css';
+
+export const MetricsVisualizationEmptyState = () => {
+    return (
+        <Paper h="100%" w="100%" className={classes.paper}>
+            <BackgroundSvg
+                SvgComponent={MetricsVisualizationEmptyStateImage}
+                className={classes.backgroundSvg}
+            >
+                <Center>
+                    <Stack gap="sm" align="center">
+                        <Paper p="xs">
+                            <MantineIcon icon={IconClockCancel} />
+                        </Paper>
+                        <Stack gap={0} align="center" maw={360}>
+                            <Text fw={600} fz="md" c="ldDark.7" ta="center">
+                                Data unavailable for selected range
+                            </Text>
+                            <Text fz="sm" c="ldGray.6" ta="center">
+                                We'd love to show you more, but the data isn't
+                                available for this range. Try selecting a
+                                different range to continue exploring!
+                            </Text>
+                        </Stack>
+                    </Stack>
+                </Center>
+            </BackgroundSvg>
+        </Paper>
+    );
+};

@@ -1,0 +1,56 @@
+{
+    "typescript.tsdk": "node_modules/typescript/lib",
+    "cssVariables.lookupFiles": [
+        "**/*.css",
+        "**/*.scss",
+        "**/*.sass",
+        "**/*.less",
+        "packages/frontend/node_modules/@mantine-8/core/styles.css"
+    ],
+    "yaml.schemas": {
+        "https://raw.githubusercontent.com/okteto/okteto/master/schema.json": [
+            "okteto.yaml",
+            "okteto.preview.yaml",
+            "okteto.dev.yaml"
+        ]
+    },
+    "eslint.workingDirectories": [
+        "./packages/common",
+        "./packages/warehouses",
+        "./packages/cli",
+        "./packages/backend",
+        "./packages/frontend",
+        "./packages/e2e",
+        "./packages/sdk-next-test-app",
+        "./packages/sdk-test-app"
+    ],
+
+    // Hide build artifacts and dependencies from explorer
+    "files.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/*.tsbuildinfo": true,
+        "**/.turbo": true,
+        "**/coverage": true
+    },
+
+    // Exclude from search (in addition to files.exclude)
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/coverage": true,
+        "**/.turbo": true,
+        "**/pnpm-lock.yaml": true
+    },
+
+    // Editor defaults
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "editor.codeActionsOnSave": {
+        "source.fixAll.eslint": "explicit"
+    },
+
+    // TypeScript
+    "typescript.preferences.importModuleSpecifier": "relative",
+    "typescript.enablePromptUseWorkspaceTsdk": true
+}

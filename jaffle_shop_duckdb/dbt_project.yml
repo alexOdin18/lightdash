@@ -1,0 +1,40 @@
+name: jaffle_shop
+config-version: 2
+version: '0.1'
+profile: jaffle_shop
+model-paths:
+  - models
+seed-paths:
+  - seeds
+test-paths:
+  - tests
+analysis-paths:
+  - analysis
+macro-paths:
+  - macros
+target-path: target
+clean-targets:
+  - target
+  - dbt_modules
+  - logs
+require-dbt-version:
+  - '>=1.0.0'
+  - <2.0.0
+seeds:
+  +docs:
+    node_color: '#cd7f32'
+  raw_orders:
+    +column_types:
+      order_date: date
+  raw_payments:
+    +column_types:
+      amount: numeric
+models:
+  jaffle_shop:
+    +materialized: table
+    staging:
+      +materialized: view
+      +docs:
+        node_color: silver
+    +docs:
+      node_color: gold

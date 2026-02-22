@@ -1,0 +1,29 @@
+# Переопределение: стабильный запуск MinIO без кастомного init-скрипта.
+# Lightdash использует MinIO (S3) для:
+#   - кэша результатов запросов (куда кладутся данные при Run query);
+#   - экспорта и выгрузок.
+# Без работающего MinIO запросы падают с "getaddrinfo ENOTFOUND minio".
+# Бакет "default" создаётся при первом обращении; при необходимости создайте его вручную в http://localhost:9001 (minioadmin / minioadmin).
+services:
+    minio:
+        container_name: minio
+        image: minio/minio:latest
+        entrypoint: ["/usr/bin/docker-entrypoint.sh"]
+        command: ["server", "/data", "--console-address", ":9001"]
+        ports:
+            - "9000:9000"
+            - "9001:9001"
+        environment:
+            MINIO_ROOT_USER: minioadmin
+            MINIO_ROOT_PASSWORD: minioadmin
+        volumes:
+            - minio-data:/data
+
+    lightdash:
+        environment:
+            - S3_ENDPOINT=http://minio:9000
+        depends_on:
+            - minio
+
+volumes:
+    minio-data:

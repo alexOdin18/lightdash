@@ -1,0 +1,41 @@
+# =============================================================================
+# Секреты и чувствительные данные
+# =============================================================================
+
+# Переменные окружения (пароли, ключи API, строки подключения)
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+!.env.example
+
+# Файлы с явными секретами в имени
+*secret*
+*credentials*
+*.credentials
+secrets/
+.secrets/
+
+# Приватные ключи и сертификаты
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+!**/root.crt
+*.cer
+
+# dbt — профили с учётными данными БД (часто содержат пароли)
+.dbt/profiles.yml
+profiles.yml
+~/.dbt/profiles.yml
+
+# Docker secrets
+docker-secrets/
+*.secret
+
+# Резервные копии с возможными секретами
+*.bak
+*.backup

@@ -1,0 +1,56 @@
+cubes:
+  - name: orders
+    sql_table: main.orders
+    data_source: default
+
+    joins:
+      - name: customers
+        sql: "{CUBE}.customer_id = {customers}.customer_id"
+        relationship: many_to_one
+
+    dimensions:
+      - name: order_id
+        sql: order_id
+        type: number
+        primary_key: true
+
+      - name: customer_id
+        sql: customer_id
+        type: number
+
+      - name: status
+        sql: status
+        type: string
+
+      - name: order_date
+        sql: order_date
+        type: time
+
+    measures:
+      - name: count
+        type: count
+
+      - name: amount
+        sql: amount
+        type: sum
+
+      - name: bank_transfer_amount
+        sql: bank_transfer_amount
+        type: sum
+
+      - name: coupon_amount
+        sql: coupon_amount
+        type: sum
+
+      - name: credit_card_amount
+        sql: credit_card_amount
+        type: sum
+
+      - name: gift_card_amount
+        sql: gift_card_amount
+        type: sum
+
+    pre_aggregations:
+      # Pre-aggregation definitions go here.
+      # Learn more in the documentation: https://cube.dev/docs/caching/pre-aggregations/getting-started
+

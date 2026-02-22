@@ -1,0 +1,14 @@
+{
+  "name": "cube-jaffle",
+  "version": "1.0.0",
+  "description": "Cube.js semantic layer for Jaffle Shop (DuckDB)",
+  "main": "index.js",
+  "scripts": {
+    "dev": "cubejs-server",
+    "start": "cubejs-server"
+  },
+  "dependencies": {
+    "@cubejs-backend/server": "^1.6.0",
+    "cubejs-duckdb-driver": "^1.6.0"
+  }
+}

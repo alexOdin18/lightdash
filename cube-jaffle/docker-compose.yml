@@ -1,0 +1,26 @@
+# Cube.js — семантический слой (как в статье Matt Martin / Substack)
+# Запуск: docker compose up
+# Playground: http://localhost:4000
+# Node.js не нужен.
+
+services:
+  cube:
+    image: cubejs/cube:latest
+    ports:
+      - "4000:4000"   # API и Cube Playground (веб-интерфейс)
+      - "15432:15432" # SQL API (Postgres): Excel, Tableau, Power BI
+    environment:
+      - CUBEJS_DEV_MODE=true
+      - CUBEJS_API_SECRET=change_me_in_production
+      - CUBEJS_DB_TYPE=duckdb
+      # Путь к DuckDB внутри контейнера (файл монтируется с хоста)
+      - CUBEJS_DB_DUCKDB_DATABASE_PATH=/data/jaffle_shop.duckdb
+      # SQL API (порт 15432): подключение из Excel, Tableau, Power BI и т.д.
+      - CUBEJS_PG_SQL_PORT=15432
+      - CUBEJS_SQL_USER=cube
+      - CUBEJS_SQL_PASSWORD=cube_secret
+    volumes:
+      # Модель семантического слоя (model/cubes/*.yml)
+      - .:/cube/conf
+      # База DuckDB из dbt-проекта (сначала выполните: dbt build в jaffle_shop_duckdb)
+      - ../jaffle_shop_duckdb:/data
